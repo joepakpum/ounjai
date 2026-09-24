@@ -154,6 +154,8 @@ h1 { margin: 0; font-size: 23px; letter-spacing: -.45px; font-weight: 600; color
 
 .modal-backdrop { position: fixed; inset: 0; z-index: 10; display: grid; place-items: center; padding: 20px; background: #17241db8; backdrop-filter: blur(3px); }
 .composer-modal { width: min(100%,520px); max-height: 94vh; overflow: auto; border-radius: 16px; background: #fff; padding: 23px 25px 19px; box-shadow: 0 20px 80px #10201945; animation: modal-in .18s ease-out; }
+.confirmation-modal { width: min(100%, 440px); }
+.confirmation-modal > p { margin: 0; color: #52645a; font-size: 13px; line-height: 1.65; overflow-wrap: anywhere; }
 @keyframes modal-in { from { opacity: 0; transform: translateY(7px) scale(.99); } to { opacity: 1; transform: none; } }
 .modal-heading { display: flex; justify-content: space-between; align-items: center; margin-bottom: 17px; }.modal-kicker { color: #7c9886; font-size: 9px; }.modal-heading h2 { margin: 2px 0 0; color: #293930; font-size: 18px; font-weight: 600; }
 .kind-tabs { display: grid; grid-template-columns: repeat(3,1fr); padding: 3px; background: #f1f4f1; border-radius: 9px; margin-bottom: 18px; }.kind-tabs button { display: flex; align-items: center; justify-content: center; gap: 6px; height: 33px; border: 0; border-radius: 7px; background: transparent; color: #87948c; font-size: 10px; }.kind-tabs button.active { background: #fff; color: #bc7962; box-shadow: 0 1px 3px #192a2012; font-weight: 600; }.kind-tabs button.income.active { color: #33885b; }.kind-tabs button.transfer.active { color: #6f86ad; }

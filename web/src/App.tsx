@@ -75,6 +75,7 @@ function App() {
   const [editingTransactionId, setEditingTransactionId] = useState<number | null>(null)
   const [clientRequestId, setClientRequestId] = useState(() => crypto.randomUUID())
   const [historyEntries, setHistoryEntries] = useState<AuditHistory[] | null>(null)
+  const [confirmation, setConfirmation] = useState<{ message: string; onConfirm: () => Promise<void> } | null>(null)
   const [splitTransaction, setSplitTransaction] = useState<Transaction | null>(null)
   const [splitRows, setSplitRows] = useState<AllocationDraft[]>([])
   const [toast, setToast] = useState('')
@@ -392,6 +393,10 @@ function App() {
     setToast(message); window.setTimeout(() => setToast(''), 2800)
   }
 
+  function askConfirmation(message: string, onConfirm: () => Promise<void>) {
+    setConfirmation({ message, onConfirm })
+  }
+
   function changeFormScope(nextScope: Scope) {
     if (!authUser || formScope === nextScope) return
     receiptUploadSequence.current += 1
@@ -493,12 +498,13 @@ function App() {
     }
   }
 
-  async function trashTransaction(item: Transaction) {
-    if (!window.confirm(`ย้าย “${item.title}” ไปถังขยะหรือไม่?`)) return
+  function trashTransaction(item: Transaction) {
+    askConfirmation(`ย้าย “${item.title}” ไปถังขยะหรือไม่?`, async () => {
     const response = await fetch(`/api/transactions/${item.id}`, { method: 'DELETE', headers: { 'content-type': 'application/json' }, body: '{}' })
     const result = await response.json() as { error?: string }
     if (!response.ok) return notify(result.error || 'ย้ายรายการไปถังขยะไม่สำเร็จ')
     setTransactions((items) => items.filter((current) => current.id !== item.id)); setFinanceVersion((value) => value + 1); notify('ย้ายรายการไปถังขยะแล้ว')
+    })
   }
 
   async function restoreTransaction(item: Transaction) {
@@ -508,12 +514,14 @@ function App() {
     setTransactions((items) => items.filter((current) => current.id !== item.id)); setFinanceVersion((value) => value + 1); notify('กู้คืนรายการแล้ว')
   }
 
-  async function deleteReceipt(item: Transaction) {
-    if (!item.receiptId || !window.confirm('ลบภาพสลิปที่แนบกับรายการนี้หรือไม่?')) return
+  function deleteReceipt(item: Transaction) {
+    if (!item.receiptId) return
+    askConfirmation('ลบภาพสลิปที่แนบกับรายการนี้หรือไม่?', async () => {
     const response = await fetch(`/api/receipts/${item.receiptId}`, { method: 'DELETE', headers: { 'content-type': 'application/json' }, body: '{}' })
     const result = await response.json() as { error?: string }
     if (!response.ok) return notify(result.error || 'ลบภาพสลิปไม่สำเร็จ')
     setTransactions((items) => items.map((current) => current.id === item.id ? { ...current, receiptId: null } : current)); notify('ลบภาพสลิปแล้ว')
+    })
   }
 
   async function saveMoneyAccount(event: FormEvent<HTMLFormElement>) {
@@ -535,12 +543,13 @@ function App() {
     setFinanceVersion((value) => value + 1); notify('แก้ไขบัญชีเงินแล้ว')
   }
 
-  async function archiveMoneyAccount(account: MoneyAccount) {
-    if (!window.confirm(`ปิดบัญชี “${account.name}” หรือไม่? ประวัติเดิมจะยังอยู่`)) return
+  function archiveMoneyAccount(account: MoneyAccount) {
+    askConfirmation(`ปิดบัญชี “${account.name}” หรือไม่? ประวัติเดิมจะยังอยู่`, async () => {
     const response = await fetch(`/api/accounts/${account.id}`, { method: 'DELETE', headers: { 'content-type': 'application/json' }, body: '{}' })
     const result = await response.json() as { error?: string }
     if (!response.ok) return notify(result.error || 'ปิดบัญชีเงินไม่สำเร็จ')
     setFinanceVersion((value) => value + 1); notify('ปิดบัญชีเงินแล้ว')
+    })
   }
 
   async function createCategory(kind: 'income' | 'expense', name: string) {
@@ -559,12 +568,13 @@ function App() {
     setFinanceVersion((value) => value + 1); notify('แก้ไขหมวดหมู่แล้ว')
   }
 
-  async function archiveCategory(category: Category) {
-    if (!window.confirm(`ซ่อนหมวดหมู่ “${category.name}” จากรายการใหม่หรือไม่?`)) return
+  function archiveCategory(category: Category) {
+    askConfirmation(`ซ่อนหมวดหมู่ “${category.name}” จากรายการใหม่หรือไม่?`, async () => {
     const response = await fetch(`/api/categories/${category.id}`, { method: 'DELETE', headers: { 'content-type': 'application/json' }, body: '{}' })
     const result = await response.json() as { error?: string }
     if (!response.ok) return notify(result.error || 'ซ่อนหมวดหมู่ไม่สำเร็จ')
     setFinanceVersion((value) => value + 1); notify('ซ่อนหมวดหมู่แล้ว')
+    })
   }
 
   async function createBudget() {
@@ -779,12 +789,13 @@ function App() {
     await refreshFamilies(); notify('ยกเลิกลิงก์เชิญแล้ว')
   }
 
-  async function leaveFamily(familyId: number) {
-    if (!window.confirm('ออกจากครอบครัวนี้หรือไม่? ประวัติเดิมจะยังคงอยู่ในสรุปครอบครัว')) return
+  function leaveFamily(familyId: number) {
+    askConfirmation('ออกจากครอบครัวนี้หรือไม่? ประวัติเดิมจะยังคงอยู่ในสรุปครอบครัว', async () => {
     const response = await fetch(`/api/families/${familyId}/leave`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })
     const result = await response.json() as { error?: string }
     if (!response.ok) return notify(result.error || 'ออกจากครอบครัวไม่สำเร็จ')
     await refreshFamilies(); notify('ออกจากครอบครัวแล้ว')
+    })
   }
 
   async function authenticated(user: AuthUser) {
@@ -882,6 +893,7 @@ function App() {
       {splitTransaction && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setSplitTransaction(null) }}><div className="composer-modal allocation-modal" role="dialog" aria-modal="true" aria-labelledby="split-title"><div className="modal-heading"><div><div className="modal-kicker">แบ่งตามหมวดและเจ้าของ</div><h2 id="split-title">{splitTransaction.title} · ฿{formatMoney(splitTransaction.amount)}</h2></div><button className="icon-button" onClick={() => setSplitTransaction(null)} aria-label="ปิด"><X size={19}/></button></div><p className="panel-subtitle">กำหนดหมวด ผู้รับผิดชอบ และยอดของแต่ละส่วน ยอดรวมต้องเท่ากับรายการหลัก</p><div className="allocation-editor">{splitRows.map((row, index) => <div className="allocation-edit-row" key={index}><label className="input-label">หมวดหมู่<select value={row.categoryId} onChange={(event) => setSplitRows((items) => items.map((item, itemIndex) => itemIndex === index ? { ...item, categoryId: event.target.value } : item))}><option value="">เลือกหมวด</option>{categoryItems.filter((category) => category.kind === splitTransaction.kind && category.ownerType === (splitTransaction.scope === 'family' ? 'family' : 'user') && category.ownerRef === (splitTransaction.scope === 'family' ? activeFamilyId : authUser.id)).map((category) => <option key={category.id} value={category.id}>{category.icon} {category.name}</option>)}</select></label>{splitTransaction.scope === 'family' ? <label className="input-label">เจ้าของส่วนนี้<select value={row.owner} onChange={(event) => setSplitRows((items) => items.map((item, itemIndex) => itemIndex === index ? { ...item, owner: event.target.value } : item))}><option value="family">ครอบครัว</option>{familyInfo.find((family) => family.id === activeFamilyId)?.members.map((member) => <option key={member.id} value={member.id}>{member.displayName}</option>)}</select></label> : <label className="input-label">เจ้าของส่วนนี้<input readOnly value={authUser.displayName}/></label>}<label className="input-label">ยอด (บาท)<input type="number" min="0.01" step="0.01" value={row.amount} onChange={(event) => setSplitRows((items) => items.map((item, itemIndex) => itemIndex === index ? { ...item, amount: event.target.value } : item))} required/></label>{splitRows.length > 1 && <button type="button" className="icon-button" onClick={() => setSplitRows((items) => items.filter((_, itemIndex) => itemIndex !== index))} aria-label="ลบส่วนแบ่ง"><X size={16}/></button>}</div>)}</div><div className="allocation-tools"><button type="button" className="secondary-button" onClick={() => { const first = categoryItems.find((category) => category.kind === splitTransaction.kind && category.ownerType === (splitTransaction.scope === 'family' ? 'family' : 'user') && category.ownerRef === (splitTransaction.scope === 'family' ? activeFamilyId : authUser.id)); setSplitRows((items) => [...items, { categoryId: String(first?.id || ''), owner: splitTransaction.scope === 'family' ? String(authUser.id) : String(authUser.id), amount: '0.00' }]) }}><Plus size={15}/> เพิ่มส่วน</button><button type="button" className="secondary-button" onClick={splitEvenly}>แบ่งเท่ากัน</button><strong>รวม ฿{formatMoney(splitRows.reduce((sum, row) => sum + (Number(row.amount) || 0), 0))}</strong></div><div className="modal-footer"><span>เก็บยอดรายการหลักไว้รายการเดียว</span><button type="button" className="secondary-button" onClick={() => setSplitTransaction(null)}>ยกเลิก</button><button type="button" className="primary-button" onClick={() => void saveAllocations()}><Check size={16}/> บันทึกส่วนแบ่ง</button></div></div></div>}
       {accountDialog && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setAccountDialog(false) }}><div className="composer-modal" role="dialog" aria-modal="true" aria-labelledby="account-dialog-title"><div className="modal-heading"><div><div className="modal-kicker">บัญชีเงินจริง</div><h2 id="account-dialog-title">เพิ่มบัญชีเงิน</h2></div><button className="icon-button" onClick={() => setAccountDialog(false)} aria-label="ปิด"><X size={19}/></button></div><form onSubmit={saveMoneyAccount}><label className="input-label">ชื่อบัญชี<input value={accountName} onChange={(event) => setAccountName(event.target.value)} maxLength={100} placeholder="เช่น เงินสด, ธนาคารกสิกร" required/></label><div className="form-grid"><label className="input-label">ประเภทบัญชี<select value={accountType} onChange={(event) => setAccountType(event.target.value as 'cash' | 'bank' | 'other')}><option value="cash">เงินสด</option><option value="bank">ธนาคาร</option><option value="other">อื่น ๆ</option></select></label><label className="input-label">ยอดตั้งต้น (บาท)<input type="number" min="0" step="0.01" value={accountOpeningBalance} onChange={(event) => setAccountOpeningBalance(event.target.value)} required/></label></div><label className="input-label">วันที่เริ่มต้นยอด<input type="date" value={accountOpeningDate} onChange={(event) => setAccountOpeningDate(event.target.value)} required/></label><div className="modal-footer"><span>{scope === 'family' ? 'บัญชีของครอบครัว' : 'บัญชีส่วนตัว'}</span><button type="button" className="secondary-button" onClick={() => setAccountDialog(false)}>ยกเลิก</button><button type="submit" className="primary-button"><Check size={16}/> สร้างบัญชี</button></div></form></div></div>}
       {historyEntries && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setHistoryEntries(null) }}><div className="composer-modal history-modal" role="dialog" aria-modal="true" aria-labelledby="history-title"><div className="modal-heading"><div><div className="modal-kicker">ตรวจสอบการเปลี่ยนแปลง</div><h2 id="history-title">ประวัติรายการ</h2></div><button className="icon-button" onClick={() => setHistoryEntries(null)} aria-label="ปิด"><X size={19}/></button></div>{historyEntries.length ? historyEntries.map((entry) => <div className="history-entry" key={entry.id}><strong>{entry.action === 'created' ? 'สร้างรายการ' : entry.action === 'updated' ? 'แก้ไขรายการ' : entry.action === 'trashed' ? 'ย้ายไปถังขยะ' : entry.action === 'allocations_updated' ? 'ปรับส่วนแบ่ง' : 'กู้คืนรายการ'}</strong><span>{entry.actor} · {new Date(entry.createdAt).toLocaleString('th-TH')}</span><small>{entry.before ? `${entry.before.title} · ฿${entry.before.amount} · ${entry.before.category}` : '—'} → {entry.after ? `${entry.after.title} · ฿${entry.after.amount} · ${entry.after.category}` : '—'}</small></div>) : <div className="empty-state">ยังไม่มีประวัติการเปลี่ยนแปลง</div>}</div></div>}
+      {confirmation && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setConfirmation(null) }}><section className="composer-modal confirmation-modal" role="alertdialog" aria-modal="true" aria-labelledby="confirmation-title" aria-describedby="confirmation-message"><div className="modal-heading"><div><div className="modal-kicker">โปรดยืนยัน</div><h2 id="confirmation-title">ยืนยันการทำรายการ</h2></div><button className="icon-button" onClick={() => setConfirmation(null)} aria-label="ปิด"><X size={19}/></button></div><p id="confirmation-message">{confirmation.message}</p><div className="modal-footer"><span>ตรวจสอบก่อนดำเนินการ</span><button type="button" className="secondary-button" onClick={() => setConfirmation(null)}>ยกเลิก</button><button type="button" className="primary-button" onClick={() => { const pending = confirmation; setConfirmation(null); void pending.onConfirm() }}>ยืนยัน</button></div></section></div>}
       {toast && <div className="toast"><Check size={16}/>{toast}</div>}
     </div>
   )

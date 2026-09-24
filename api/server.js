@@ -1080,8 +1080,11 @@ async function handle(request, response) {
     const amount = body.amount === undefined ? Number(budget.amount) : Number(body.amount)
     const alertPercent = body.alertPercent === undefined ? Number(budget.alert_percent) : Number(body.alertPercent)
     const cycleStartDay = body.cycleStartDay === undefined ? Number(budget.cycle_start_day) : Number(body.cycleStartDay)
-    if (!Number.isFinite(amount) || amount <= 0 || Math.round(amount * 100) !== amount * 100 || !Number.isInteger(alertPercent) || alertPercent < 1 || alertPercent > 100 || budget.period_type === 'monthly' && (!Number.isInteger(cycleStartDay) || cycleStartDay < 1 || cycleStartDay > 28)) return send(response, 400, { error: 'วงเงิน รอบเวลา หรือค่าเตือนไม่ถูกต้อง' })
-    await pool.execute('UPDATE budgets SET amount = ?, alert_percent = ?, cycle_start_day = ? WHERE id = ?', [amount, alertPercent, cycleStartDay, budget.id])
+    const periodType = body.periodType === undefined ? budget.period_type : body.periodType
+    const periodStart = body.periodStart === undefined ? budget.period_start : body.periodStart ? String(body.periodStart) : null
+    const periodEnd = body.periodEnd === undefined ? budget.period_end : body.periodEnd ? String(body.periodEnd) : null
+    if (!Number.isFinite(amount) || amount <= 0 || Math.round(amount * 100) !== amount * 100 || !Number.isInteger(alertPercent) || alertPercent < 1 || alertPercent > 100 || !['monthly', 'custom'].includes(periodType) || periodType === 'monthly' && (!Number.isInteger(cycleStartDay) || cycleStartDay < 1 || cycleStartDay > 28) || periodType === 'custom' && (!validDateKey(periodStart) || !validDateKey(periodEnd) || periodEnd < periodStart)) return send(response, 400, { error: 'วงเงิน รอบเวลา หรือค่าเตือนไม่ถูกต้อง' })
+    await pool.execute('UPDATE budgets SET amount = ?, alert_percent = ?, period_type = ?, cycle_start_day = ?, period_start = ?, period_end = ? WHERE id = ?', [amount, alertPercent, periodType, cycleStartDay, periodType === 'custom' ? periodStart : null, periodType === 'custom' ? periodEnd : null, budget.id])
     return send(response, 200, { ok: true })
   }
 

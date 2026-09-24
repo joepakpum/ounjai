@@ -155,6 +155,7 @@ h1 { margin: 0; font-size: 23px; letter-spacing: -.45px; font-weight: 600; color
 .modal-backdrop { position: fixed; inset: 0; z-index: 10; display: grid; place-items: center; padding: 20px; background: #17241db8; backdrop-filter: blur(3px); }
 .composer-modal { width: min(100%,520px); max-height: 94vh; overflow: auto; border-radius: 16px; background: #fff; padding: 23px 25px 19px; box-shadow: 0 20px 80px #10201945; animation: modal-in .18s ease-out; }
 .composer-modal.recurring-editor { width: min(100%,760px); }
+.composer-modal form > .input-label { margin-bottom: 12px; }
 .confirmation-modal { width: min(100%, 440px); }
 .confirmation-modal > p { margin: 0; color: #52645a; font-size: 13px; line-height: 1.65; overflow-wrap: anywhere; }
 @keyframes modal-in { from { opacity: 0; transform: translateY(7px) scale(.99); } to { opacity: 1; transform: none; } }

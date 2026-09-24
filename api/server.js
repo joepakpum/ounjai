@@ -580,6 +580,119 @@ async function handle(request, response) {
     return send(response, 200, { user })
   }
 
+  if (method === 'GET' && pathname === '/api/account/export') {
+    const user = await currentUser(request)
+    if (!user) return send(response, 401, { error: 'กรุณาเข้าสู่ระบบ' })
+    const familyIds = user.families.map((family) => family.id)
+    const familyPlaceholders = familyIds.length ? familyIds.map(() => '?').join(',') : 'NULL'
+    const familyParams = familyIds
+    const [[profile]] = await pool.execute('SELECT id, email, display_name, email_verified_at, created_at FROM users WHERE id = ?', [user.id])
+    const [memberships] = await pool.execute(`
+      SELECT f.id AS family_id, f.name, fm.role, fm.joined_at, fm.left_at
+      FROM family_members fm JOIN families f ON f.id = fm.family_id
+      WHERE fm.user_id = ? ORDER BY fm.joined_at, fm.id
+    `, [user.id])
+    const [accounts] = await pool.execute(`
+      SELECT a.id, a.owner_type, a.owner_ref, a.owner_user_id, a.family_id, a.name, a.account_type,
+        a.opening_balance, a.opening_date, a.archived_at, a.created_by_user_id, a.created_at,
+        a.opening_balance + COALESCE(SUM(CASE
+          WHEN t.kind = 'income' AND t.destination_account_id = a.id THEN t.amount
+          WHEN t.kind = 'expense' AND t.source_account_id = a.id THEN -t.amount
+          WHEN t.kind = 'transfer' AND t.source_account_id = a.id THEN -t.amount
+          WHEN t.kind = 'transfer' AND t.destination_account_id = a.id THEN t.amount
+          ELSE 0 END), 0) AS balance
+      FROM money_accounts a LEFT JOIN transactions t ON (t.source_account_id = a.id OR t.destination_account_id = a.id)
+        AND t.deleted_at IS NULL AND DATE(t.occurred_at) >= a.opening_date
+      WHERE (a.owner_type = 'user' AND a.owner_user_id = ?) OR (a.owner_type = 'family' AND a.family_id IN (${familyPlaceholders}))
+      GROUP BY a.id ORDER BY a.owner_type, a.name
+    `, [user.id, ...familyParams])
+    const [categories] = await pool.execute(`
+      SELECT id, owner_type, owner_ref, owner_user_id, family_id, kind, name, icon, is_default, archived_at, created_by_user_id, created_at
+      FROM transaction_categories
+      WHERE (owner_type = 'user' AND owner_user_id = ?) OR (owner_type = 'family' AND family_id IN (${familyPlaceholders}))
+      ORDER BY owner_type, kind, name
+    `, [user.id, ...familyParams])
+    const [budgets] = await pool.execute(`
+      SELECT b.id, b.owner_type, b.owner_ref, b.owner_user_id, b.family_id, b.category_id, c.name AS category,
+        b.amount, b.period_type, b.cycle_start_day, b.period_start, b.period_end, b.alert_percent,
+        b.archived_at, b.created_by_user_id, b.created_at
+      FROM budgets b JOIN transaction_categories c ON c.id = b.category_id
+      WHERE (b.owner_type = 'user' AND b.owner_user_id = ?) OR (b.owner_type = 'family' AND b.family_id IN (${familyPlaceholders}))
+      ORDER BY b.created_at, b.id
+    `, [user.id, ...familyParams])
+    const [budgetMovements] = await pool.execute(`
+      SELECT bm.id, bm.owner_type, bm.owner_ref, bm.from_budget_id, bm.to_budget_id,
+        c1.name AS from_category, c2.name AS to_category, bm.amount, bm.note, bm.moved_by_user_id,
+        bm.created_at, u.display_name AS moved_by
+      FROM budget_movements bm JOIN budgets b1 ON b1.id = bm.from_budget_id JOIN budgets b2 ON b2.id = bm.to_budget_id
+      JOIN transaction_categories c1 ON c1.id = b1.category_id JOIN transaction_categories c2 ON c2.id = b2.category_id
+      JOIN users u ON u.id = bm.moved_by_user_id
+      WHERE (bm.owner_type = 'user' AND bm.owner_ref = ?) OR (bm.owner_type = 'family' AND bm.owner_ref IN (${familyPlaceholders}))
+      ORDER BY bm.created_at, bm.id
+    `, [user.id, ...familyParams])
+    const transactionWhere = `(t.scope = 'personal' AND t.created_by_user_id = ?) OR (t.scope = 'family' AND t.family_id IN (${familyPlaceholders}) AND EXISTS (SELECT 1 FROM family_members export_member WHERE export_member.family_id = t.family_id AND export_member.user_id = ? AND export_member.left_at IS NULL))`
+    const transactionParams = [user.id, ...familyParams, user.id]
+    const [transactions] = await pool.execute(`
+      SELECT t.id, t.title, COALESCE(c.name, t.category) AS category, t.category_id, t.kind, t.amount, t.scope,
+        t.family_id, t.created_by_user_id, t.updated_by_user_id, t.category_id,
+        t.source_account_id, t.destination_account_id, t.occurred_at, t.created_at, t.updated_at, t.deleted_at,
+        CASE WHEN sa.owner_type = 'user' AND sa.owner_user_id <> ? THEN 'บัญชีสมาชิก' ELSE COALESCE(sa.name, t.source_account) END AS source_account,
+        CASE WHEN da.owner_type = 'user' AND da.owner_user_id <> ? THEN 'บัญชีสมาชิก' ELSE COALESCE(da.name, t.destination_account) END AS destination_account,
+        t.owner_name, t.payer_name, recorder.display_name AS recorder_name, updater.display_name AS updated_by, t.icon
+      FROM transactions t
+      LEFT JOIN transaction_categories c ON c.id = t.category_id
+      LEFT JOIN money_accounts sa ON sa.id = t.source_account_id
+      LEFT JOIN money_accounts da ON da.id = t.destination_account_id
+      LEFT JOIN users recorder ON recorder.id = t.created_by_user_id
+      LEFT JOIN users updater ON updater.id = t.updated_by_user_id
+      WHERE ${transactionWhere} ORDER BY t.occurred_at, t.id
+    `, [user.id, user.id, ...transactionParams])
+    const [allocations] = await pool.execute(`
+      SELECT a.id, a.transaction_id, a.category_id, c.name AS category, a.owner_user_id, a.owner_is_family, u.display_name AS owner_name, a.amount
+      FROM transaction_allocations a JOIN transactions t ON t.id = a.transaction_id
+      LEFT JOIN transaction_categories c ON c.id = a.category_id LEFT JOIN users u ON u.id = a.owner_user_id
+      WHERE ${transactionWhere} ORDER BY a.transaction_id, a.id
+    `, transactionParams)
+    const [history] = await pool.execute(`
+      SELECT al.id, al.transaction_id, al.actor_user_id, al.action, al.before_snapshot, al.after_snapshot, al.created_at, actor.display_name AS actor
+      FROM transaction_audit_logs al JOIN transactions t ON t.id = al.transaction_id
+      JOIN users actor ON actor.id = al.actor_user_id
+      WHERE ${transactionWhere} ORDER BY al.transaction_id, al.created_at, al.id
+    `, transactionParams)
+    const [recurringRules] = await pool.execute(`
+      SELECT r.id, r.owner_type, r.owner_ref, r.owner_user_id, r.family_id, r.created_by_user_id, r.kind, r.title,
+        r.category_id, c.name AS category, r.amount, r.source_account_id, r.destination_account_id,
+        r.owner_name, r.payer_name, r.frequency, r.interval_count, r.day_of_month,
+        r.starts_on, r.ends_on, r.paused_at, r.created_at
+      FROM recurring_rules r LEFT JOIN transaction_categories c ON c.id = r.category_id
+      WHERE (r.owner_type = 'user' AND r.owner_user_id = ?) OR (r.owner_type = 'family' AND r.family_id IN (${familyPlaceholders}))
+      ORDER BY r.created_at, r.id
+    `, [user.id, ...familyParams])
+    const [recurringReviews] = await pool.execute(`
+      SELECT rr.recurring_rule_id, rr.cycle_key, rr.review_date, rr.payload, rr.status, rr.reviewed_at,
+        rr.created_at, reviewer.display_name AS reviewed_by
+      FROM recurring_reviews rr JOIN recurring_rules r ON r.id = rr.recurring_rule_id
+      LEFT JOIN users reviewer ON reviewer.id = rr.reviewed_by_user_id
+      WHERE (r.owner_type = 'user' AND r.owner_user_id = ?) OR (r.owner_type = 'family' AND r.family_id IN (${familyPlaceholders}))
+      ORDER BY rr.review_date, rr.id
+    `, [user.id, ...familyParams])
+    const [receipts] = await pool.execute(`
+      SELECT id, transaction_id, family_id, original_name, mime_type, size_bytes, content_sha256,
+        processing_status, extracted_data, created_at, deleted_at, CONCAT('/api/receipts/', id, '/content') AS download_path
+      FROM receipt_attachments
+      WHERE (owner_user_id = ? OR family_id IN (${familyPlaceholders}))
+      ORDER BY created_at, id
+    `, [user.id, ...familyParams])
+    const exportData = {
+      format: 'ounjai-account-export-v1', generatedAt: new Date().toISOString(),
+      profile: { id: Number(profile.id), email: profile.email, displayName: profile.display_name, emailVerifiedAt: profile.email_verified_at, createdAt: profile.created_at },
+      memberships, accounts: accounts.map((account) => ({ ...account, id: Number(account.id), ownerUserId: account.owner_user_id == null ? null : Number(account.owner_user_id), familyId: account.family_id == null ? null : Number(account.family_id), openingBalance: Number(account.opening_balance), balance: Number(account.balance) })),
+      categories, budgets, budgetMovements, transactions, allocations, history, recurringRules, recurringReviews, receipts,
+    }
+    const date = new Date().toISOString().slice(0, 10)
+    return send(response, 200, exportData, { 'content-disposition': `attachment; filename="ounjai-data-export-${date}.json"` })
+  }
+
   if (method === 'GET' && pathname === '/api/families') {
     const user = await currentUser(request)
     if (!user) return send(response, 401, { error: 'กรุณาเข้าสู่ระบบ' })

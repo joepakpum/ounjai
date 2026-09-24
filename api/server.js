@@ -680,7 +680,7 @@ async function handle(request, response) {
       SELECT id, transaction_id, family_id, original_name, mime_type, size_bytes, content_sha256,
         processing_status, extracted_data, created_at, deleted_at, CONCAT('/api/receipts/', id, '/content') AS download_path
       FROM receipt_attachments
-      WHERE (owner_user_id = ? OR family_id IN (${familyPlaceholders}))
+      WHERE (family_id IS NULL AND owner_user_id = ?) OR family_id IN (${familyPlaceholders})
       ORDER BY created_at, id
     `, [user.id, ...familyParams])
     const exportData = {

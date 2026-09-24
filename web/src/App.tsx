@@ -11,7 +11,7 @@ import './App.css'
 
 type Kind = 'expense' | 'income' | 'transfer'
 type Scope = 'family' | 'personal'
-type AuthUser = { id: number; email: string; displayName: string; families: { id: number; name: string; role: 'owner' | 'member' }[] }
+type AuthUser = { id: number; email: string; displayName: string; systemRole: 'user' | 'superadmin'; families: { id: number; name: string; role: 'owner' | 'member' }[] }
 type Transaction = {
   id: number; title: string; category: string; kind: Kind; amount: number
   date: string; account: string; owner: string; payer?: string; recorder: string; icon: string; scope: Scope
@@ -186,7 +186,7 @@ function App() {
         <div className="sidebar-bottom">
           <div className="sidebar-tip"><div className="tip-icon"><Sparkles size={16} /></div><strong>เริ่มจดได้เลย</strong><p>เพิ่มรายการใหม่เพื่อให้เห็นภาพรวมการเงินของบ้าน</p><button onClick={() => openComposer('expense')}>เพิ่มรายการ <ArrowUpRight size={14} /></button></div>
           <button className="nav-item"><Settings2 size={18} /><span>ตั้งค่า</span></button>
-          <div className="profile"><div className="avatar user-avatar">{authUser.displayName.slice(0, 1)}</div><div className="profile-copy"><strong>{authUser.displayName}</strong><span>{authUser.families[0]?.role === 'owner' ? 'เจ้าของครอบครัว' : 'สมาชิกครอบครัว'}</span></div><button className="signout-button" onClick={signOut} aria-label="ออกจากระบบ" title="ออกจากระบบ"><LogOut size={15}/></button></div>
+          <div className="profile"><div className="avatar user-avatar">{authUser.displayName.slice(0, 1)}</div><div className="profile-copy"><strong>{authUser.displayName}</strong><span>{authUser.systemRole === 'superadmin' ? 'Super Admin' : authUser.families[0]?.role === 'owner' ? 'เจ้าของครอบครัว' : 'สมาชิกครอบครัว'}</span></div><button className="signout-button" onClick={signOut} aria-label="ออกจากระบบ" title="ออกจากระบบ"><LogOut size={15}/></button></div>
         </div>
       </aside>
 

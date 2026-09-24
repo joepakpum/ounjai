@@ -147,7 +147,7 @@ async function currentUser(request) {
   const token = readCookie(request, cookieName)
   if (!token || !/^[A-Za-z0-9_-]{40,50}$/.test(token)) return null
   const [rows] = await pool.execute(`
-    SELECT u.id, u.email, u.display_name
+    SELECT u.id, u.email, u.display_name, u.system_role
     FROM user_sessions s JOIN users u ON u.id = s.user_id
     WHERE s.id = ? AND s.expires_at > UTC_TIMESTAMP() AND u.email_verified_at IS NOT NULL
   `, [digest(token)])
@@ -159,8 +159,21 @@ async function currentUser(request) {
   `, [rows[0].id])
   return {
     id: Number(rows[0].id), email: rows[0].email, displayName: rows[0].display_name,
+    systemRole: rows[0].system_role,
     families: families.map((family) => ({ id: Number(family.id), name: family.name, role: family.role })),
   }
+}
+
+async function syncConfiguredSuperAdmin() {
+  const email = String(process.env.SYSTEM_ADMIN_EMAIL || '').trim().toLowerCase()
+  if (!email) return
+  await pool.execute(`
+    UPDATE users SET system_role = CASE
+      WHEN LOWER(email) = ? AND email_verified_at IS NOT NULL THEN 'superadmin'
+      ELSE 'user'
+    END
+    WHERE system_role = 'superadmin' OR LOWER(email) = ?
+  `, [email, email])
 }
 
 async function createSession(userId, response) {
@@ -269,6 +282,12 @@ async function handle(request, response) {
       }
       await connection.execute('UPDATE account_tokens SET used_at = UTC_TIMESTAMP() WHERE id = ?', [tokens[0].id])
       await connection.execute('UPDATE users SET email_verified_at = UTC_TIMESTAMP() WHERE id = ?', [tokens[0].user_id])
+      const configuredAdminEmail = String(process.env.SYSTEM_ADMIN_EMAIL || '').trim().toLowerCase()
+      if (configuredAdminEmail) {
+        await connection.execute(`
+          UPDATE users SET system_role = IF(LOWER(email) = ?, 'superadmin', 'user') WHERE id = ?
+        `, [configuredAdminEmail, tokens[0].user_id])
+      }
       const [families] = await connection.execute('SELECT id FROM families WHERE created_by_user_id = ? LIMIT 1', [tokens[0].user_id])
       let familyId = families[0]?.id
       if (!familyId) {
@@ -452,6 +471,7 @@ const server = http.createServer((request, response) => {
 })
 
 await migrate(pool)
+await syncConfiguredSuperAdmin()
 server.listen(port, '0.0.0.0', () => console.log(`saving API listening on ${port}`))
 
 async function shutdown() {

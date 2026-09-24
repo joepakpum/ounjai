@@ -68,6 +68,10 @@ function digest(value) {
   return createHash('sha256').update(value).digest('hex')
 }
 
+function bangkokDateKey(value = new Date()) {
+  return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Bangkok', year: 'numeric', month: '2-digit', day: '2-digit' }).format(value)
+}
+
 function validDateKey(value) {
   const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(value))
   if (!match) return false
@@ -119,7 +123,7 @@ function recurringReviewDates(rule, todayKey) {
 }
 
 async function processRecurringReviews() {
-  const today = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Bangkok', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date())
+  const today = bangkokDateKey()
   const [rules] = await pool.execute("SELECT * FROM recurring_rules WHERE paused_at IS NULL AND (ends_on IS NULL OR ends_on >= starts_on)")
   for (const rule of rules) {
     const dates = recurringReviewDates(rule, today)
@@ -735,7 +739,7 @@ async function handle(request, response) {
       categories, budgets, budgetMovements, transactions, allocations, history: safeHistory,
       recurringRules: safeRecurringRules, recurringReviews: safeRecurringReviews, receipts,
     }
-    const date = new Date().toISOString().slice(0, 10)
+    const date = bangkokDateKey()
     return send(response, 200, exportData, { 'content-disposition': `attachment; filename="ounjai-data-export-${date}.json"` })
   }
 
@@ -911,7 +915,7 @@ async function handle(request, response) {
     const name = String(body.name || '').trim()
     const accountType = body.accountType
     const openingBalance = Number(body.openingBalance || 0)
-    const openingDate = String(body.openingDate || new Date().toISOString().slice(0, 10))
+    const openingDate = String(body.openingDate || bangkokDateKey())
     if (!['personal', 'family'].includes(scope) || !name || name.length > 100 || !['cash', 'bank', 'other'].includes(accountType)) return send(response, 400, { error: 'กรอกชื่อ ขอบเขต และประเภทบัญชีให้ถูกต้อง' })
     if (!Number.isFinite(openingBalance) || Math.round(openingBalance * 100) !== openingBalance * 100 || !validDateKey(openingDate)) return send(response, 400, { error: 'ยอดตั้งต้นหรือวันที่ไม่ถูกต้อง' })
     let ownerType = 'user'; let ownerRef = user.id; let ownerUserId = user.id; let family = null
@@ -1182,7 +1186,7 @@ async function handle(request, response) {
     const kind = body.kind; const title = String(body.title || '').trim(); const amount = Number(body.amount)
     const frequency = body.frequency; const intervalCount = Number(body.intervalCount || 1)
     const dayOfMonth = body.dayOfMonth == null || body.dayOfMonth === '' ? null : Number(body.dayOfMonth)
-    const startsOn = String(body.startsOn || new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Bangkok' }))
+    const startsOn = String(body.startsOn || bangkokDateKey())
     const endsOn = body.endsOn ? String(body.endsOn) : null
     const sourceAccountId = Number(body.sourceAccountId); const destinationAccountId = Number(body.destinationAccountId) || null
     const categoryId = Number(body.categoryId) || null; const owner = String(body.owner || '').trim(); const payer = kind === 'expense' ? String(body.payer || '').trim() : null
@@ -1604,7 +1608,7 @@ async function handle(request, response) {
     const amount = Number(body.amount)
     const title = String(body.title || '').trim()
     const clientRequestId = body.clientRequestId == null ? null : String(body.clientRequestId)
-    const occurredAtInput = String(body.occurredAt || `${new Date().toISOString().slice(0, 10)}T12:00:00+07:00`)
+    const occurredAtInput = String(body.occurredAt || `${bangkokDateKey()}T12:00:00+07:00`)
     const occurredAt = occurredAtInput.replace('T', ' ').replace(/(?:\+07:00|Z)$/, '').slice(0, 19)
     const requestedCategoryId = Number(body.categoryId) || null
     let category = String(body.category || '').trim()

@@ -80,6 +80,43 @@ function validLocalDateTime(value) {
   return hour < 24 && minute < 60 && second < 60
 }
 
+function recurringReviewDates(rule, todayKey) {
+  const startKey = String(rule.starts_on).slice(0, 10)
+  if (!validDateKey(startKey) || todayKey < startKey) return []
+  const effectiveToday = rule.ends_on && todayKey > String(rule.ends_on).slice(0, 10) ? String(rule.ends_on).slice(0, 10) : todayKey
+  if (effectiveToday < startKey) return []
+  const [sy, sm, sd] = startKey.split('-').map(Number)
+  const [ty, tm, td] = effectiveToday.split('-').map(Number)
+  const interval = Math.max(1, Number(rule.interval_count) || 1)
+  const dateKey = (date) => `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}-${String(date.getUTCDate()).padStart(2, '0')}`
+  const dates = []
+  if (rule.frequency === 'weekly') {
+    const start = Date.UTC(sy, sm - 1, sd); const today = Date.UTC(ty, tm - 1, td)
+    const last = Math.floor((today - start) / 604800000 / interval)
+    for (let i = 0; i <= last && dates.length < 1200; i += 1) dates.push(dateKey(new Date(start + i * interval * 604800000)))
+    return dates
+  }
+  if (rule.frequency === 'monthly') {
+    const lastMonth = (ty - sy) * 12 + tm - sm
+    for (let months = 0; months <= lastMonth && dates.length < 1200; months += interval) {
+      const targetMonth = sm - 1 + months
+      const year = sy + Math.floor(targetMonth / 12); const month = targetMonth % 12
+      const day = Math.min(Number(rule.day_of_month) || sd, new Date(Date.UTC(year, month + 1, 0)).getUTCDate())
+      const due = dateKey(new Date(Date.UTC(year, month, day)))
+      if (due >= startKey && due <= effectiveToday) dates.push(due)
+    }
+    return dates
+  }
+  const lastYear = ty - sy
+  for (let years = 0; years <= lastYear && dates.length < 1200; years += interval) {
+    const year = sy + years; const month = sm - 1
+    const day = Math.min(sd, new Date(Date.UTC(year, month + 1, 0)).getUTCDate())
+    const due = dateKey(new Date(Date.UTC(year, month, day)))
+    if (due >= startKey && due <= effectiveToday) dates.push(due)
+  }
+  return dates
+}
+
 function receiptSuggestions(text) {
   const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
   const totalLine = lines.find((line) => /ยอดสุทธิ|ยอดชำระ|รวมทั้งสิ้น|grand total|total/i.test(line))
@@ -301,6 +338,12 @@ function canManageTransaction(user, row) {
   if (row.scope === 'personal') return Number(row.created_by_user_id) === user.id
   const membership = user.families.find((family) => family.id === Number(row.family_id))
   return Boolean(membership && (membership.role === 'owner' || Number(row.created_by_user_id) === user.id))
+}
+
+function canManageRecurringRule(user, rule) {
+  if (rule.owner_type === 'user') return Number(rule.created_by_user_id) === user.id
+  const membership = user.families.find((family) => family.id === Number(rule.family_id))
+  return Boolean(membership && (membership.role === 'owner' || Number(rule.created_by_user_id) === user.id))
 }
 
 async function auditTransaction(connection, transactionId, userId, action, before, after) {
@@ -782,20 +825,25 @@ async function handle(request, response) {
     const familyId = Number(url.searchParams.get('familyId')) || user.families[0]?.id || 0
     if (scope === 'family' && !user.families.some((family) => family.id === familyId)) return send(response, 403, { error: 'คุณไม่มีสิทธิ์ดูงบครอบครัวนี้' })
     const ownerRef = scope === 'family' ? familyId : user.id
+    const budgetSpentPeriod = `((b.period_type = 'monthly' AND DATE(t.occurred_at) >= CASE
+      WHEN DAY(CURDATE()) >= b.cycle_start_day THEN DATE_ADD(DATE_FORMAT(CURDATE(), '%Y-%m-01'), INTERVAL b.cycle_start_day - 1 DAY)
+      ELSE DATE_ADD(DATE_FORMAT(DATE_SUB(CURDATE(), INTERVAL 1 MONTH), '%Y-%m-01'), INTERVAL b.cycle_start_day - 1 DAY) END
+      AND DATE(t.occurred_at) < CASE WHEN DAY(CURDATE()) >= b.cycle_start_day
+      THEN DATE_ADD(DATE_ADD(DATE_FORMAT(CURDATE(), '%Y-%m-01'), INTERVAL b.cycle_start_day - 1 DAY), INTERVAL 1 MONTH)
+      ELSE DATE_ADD(DATE_ADD(DATE_FORMAT(DATE_SUB(CURDATE(), INTERVAL 1 MONTH), '%Y-%m-01'), INTERVAL b.cycle_start_day - 1 DAY), INTERVAL 1 MONTH) END)
+      OR (b.period_type = 'custom' AND DATE(t.occurred_at) BETWEEN b.period_start AND b.period_end))`
+    const budgetSpentScope = `t.scope = b.owner_type AND ((b.owner_type = 'user' AND t.created_by_user_id = b.owner_user_id) OR (b.owner_type = 'family' AND t.family_id = b.family_id))`
     const [rows] = await pool.execute(`
       SELECT b.id, b.owner_type, b.owner_ref, b.category_id,
         b.amount + COALESCE((SELECT SUM(CASE WHEN bm.to_budget_id = b.id THEN bm.amount WHEN bm.from_budget_id = b.id THEN -bm.amount ELSE 0 END) FROM budget_movements bm WHERE bm.to_budget_id = b.id OR bm.from_budget_id = b.id), 0) AS amount,
         b.period_type, b.cycle_start_day,
         b.period_start, b.period_end, b.alert_percent, c.name AS category_name, c.icon,
         COALESCE((SELECT SUM(t.amount) FROM transactions t WHERE t.category_id = b.category_id AND t.kind = 'expense' AND t.deleted_at IS NULL
-          AND ((b.period_type = 'monthly' AND DATE(t.occurred_at) >= CASE
-            WHEN DAY(CURDATE()) >= b.cycle_start_day THEN DATE_ADD(DATE_FORMAT(CURDATE(), '%Y-%m-01'), INTERVAL b.cycle_start_day - 1 DAY)
-            ELSE DATE_ADD(DATE_FORMAT(DATE_SUB(CURDATE(), INTERVAL 1 MONTH), '%Y-%m-01'), INTERVAL b.cycle_start_day - 1 DAY) END
-            AND DATE(t.occurred_at) < CASE WHEN DAY(CURDATE()) >= b.cycle_start_day
-            THEN DATE_ADD(DATE_ADD(DATE_FORMAT(CURDATE(), '%Y-%m-01'), INTERVAL b.cycle_start_day - 1 DAY), INTERVAL 1 MONTH)
-            ELSE DATE_ADD(DATE_ADD(DATE_FORMAT(DATE_SUB(CURDATE(), INTERVAL 1 MONTH), '%Y-%m-01'), INTERVAL b.cycle_start_day - 1 DAY), INTERVAL 1 MONTH) END)
-            OR (b.period_type = 'custom' AND DATE(t.occurred_at) BETWEEN b.period_start AND b.period_end))
-          AND t.scope = b.owner_type AND ((b.owner_type = 'user' AND t.created_by_user_id = b.owner_user_id) OR (b.owner_type = 'family' AND t.family_id = b.family_id))), 0) AS spent
+          AND NOT EXISTS (SELECT 1 FROM transaction_allocations a WHERE a.transaction_id = t.id)
+          AND ${budgetSpentPeriod} AND ${budgetSpentScope}), 0)
+        + COALESCE((SELECT SUM(a.amount) FROM transaction_allocations a JOIN transactions t ON t.id = a.transaction_id
+          WHERE a.category_id = b.category_id AND t.kind = 'expense' AND t.deleted_at IS NULL
+          AND ${budgetSpentPeriod} AND ${budgetSpentScope}), 0) AS spent
       FROM budgets b JOIN transaction_categories c ON c.id = b.category_id
       WHERE b.owner_type = ? AND b.owner_ref = ? AND b.archived_at IS NULL
       ORDER BY c.name
@@ -842,8 +890,22 @@ async function handle(request, response) {
     if (!from || !to || from.owner_type !== to.owner_type || Number(from.owner_ref) !== Number(to.owner_ref)) return send(response, 400, { error: 'ย้ายได้ระหว่างงบในขอบเขตเดียวกันเท่านั้น' })
     const allowed = from.owner_type === 'user' && Number(from.owner_user_id) === user.id || from.owner_type === 'family' && user.families.some((family) => family.id === Number(from.family_id) && family.role === 'owner')
     if (!allowed) return send(response, 403, { error: 'คุณไม่มีสิทธิ์ย้ายงบนี้' })
-    const [[balance]] = await pool.execute(`SELECT b.amount + COALESCE(SUM(CASE WHEN bm.to_budget_id = b.id THEN bm.amount WHEN bm.from_budget_id = b.id THEN -bm.amount ELSE 0 END), 0) AS available FROM budgets b LEFT JOIN budget_movements bm ON bm.from_budget_id = b.id OR bm.to_budget_id = b.id WHERE b.id = ? GROUP BY b.id`, [fromId])
-    if (Number(balance.available) < amount) return send(response, 409, { error: 'วงเงินต้นทางไม่พอสำหรับย้าย' })
+    const [[balance]] = await pool.execute(`
+      SELECT b.amount + COALESCE((SELECT SUM(CASE WHEN bm.to_budget_id = b.id THEN bm.amount WHEN bm.from_budget_id = b.id THEN -bm.amount ELSE 0 END) FROM budget_movements bm WHERE bm.to_budget_id = b.id OR bm.from_budget_id = b.id), 0)
+        - COALESCE((SELECT SUM(t.amount) FROM transactions t WHERE t.category_id = b.category_id AND t.kind = 'expense' AND t.deleted_at IS NULL
+          AND NOT EXISTS (SELECT 1 FROM transaction_allocations a WHERE a.transaction_id = t.id)
+          AND ((b.period_type = 'monthly' AND DATE(t.occurred_at) >= CASE WHEN DAY(CURDATE()) >= b.cycle_start_day THEN DATE_ADD(DATE_FORMAT(CURDATE(), '%Y-%m-01'), INTERVAL b.cycle_start_day - 1 DAY) ELSE DATE_ADD(DATE_FORMAT(DATE_SUB(CURDATE(), INTERVAL 1 MONTH), '%Y-%m-01'), INTERVAL b.cycle_start_day - 1 DAY) END
+            AND DATE(t.occurred_at) < CASE WHEN DAY(CURDATE()) >= b.cycle_start_day THEN DATE_ADD(DATE_ADD(DATE_FORMAT(CURDATE(), '%Y-%m-01'), INTERVAL b.cycle_start_day - 1 DAY), INTERVAL 1 MONTH) ELSE DATE_ADD(DATE_ADD(DATE_FORMAT(DATE_SUB(CURDATE(), INTERVAL 1 MONTH), '%Y-%m-01'), INTERVAL b.cycle_start_day - 1 DAY), INTERVAL 1 MONTH) END)
+            OR (b.period_type = 'custom' AND DATE(t.occurred_at) BETWEEN b.period_start AND b.period_end))
+          AND t.scope = b.owner_type AND ((b.owner_type = 'user' AND t.created_by_user_id = b.owner_user_id) OR (b.owner_type = 'family' AND t.family_id = b.family_id)), 0)
+        - COALESCE((SELECT SUM(a.amount) FROM transaction_allocations a JOIN transactions t ON t.id = a.transaction_id WHERE a.category_id = b.category_id AND t.kind = 'expense' AND t.deleted_at IS NULL
+          AND ((b.period_type = 'monthly' AND DATE(t.occurred_at) >= CASE WHEN DAY(CURDATE()) >= b.cycle_start_day THEN DATE_ADD(DATE_FORMAT(CURDATE(), '%Y-%m-01'), INTERVAL b.cycle_start_day - 1 DAY) ELSE DATE_ADD(DATE_FORMAT(DATE_SUB(CURDATE(), INTERVAL 1 MONTH), '%Y-%m-01'), INTERVAL b.cycle_start_day - 1 DAY) END
+            AND DATE(t.occurred_at) < CASE WHEN DAY(CURDATE()) >= b.cycle_start_day THEN DATE_ADD(DATE_ADD(DATE_FORMAT(CURDATE(), '%Y-%m-01'), INTERVAL b.cycle_start_day - 1 DAY), INTERVAL 1 MONTH) ELSE DATE_ADD(DATE_ADD(DATE_FORMAT(DATE_SUB(CURDATE(), INTERVAL 1 MONTH), '%Y-%m-01'), INTERVAL b.cycle_start_day - 1 DAY), INTERVAL 1 MONTH) END)
+            OR (b.period_type = 'custom' AND DATE(t.occurred_at) BETWEEN b.period_start AND b.period_end))
+          AND t.scope = b.owner_type AND ((b.owner_type = 'user' AND t.created_by_user_id = b.owner_user_id) OR (b.owner_type = 'family' AND t.family_id = b.family_id))), 0) AS available
+      FROM budgets b WHERE b.id = ?
+    `, [fromId])
+    if (Number(balance.available) < amount) return send(response, 409, { error: 'วงเงินคงเหลือหลังหักรายจ่ายไม่พอสำหรับย้าย' })
     await pool.execute('INSERT INTO budget_movements (owner_type, owner_ref, from_budget_id, to_budget_id, amount, moved_by_user_id, note) VALUES (?, ?, ?, ?, ?, ?, ?)', [from.owner_type, from.owner_ref, fromId, toId, amount, user.id, String(body.note || '').slice(0, 255) || null])
     return send(response, 201, { ok: true })
   }
@@ -889,6 +951,157 @@ async function handle(request, response) {
       await pool.execute('UPDATE transaction_categories SET name = ?, icon = ? WHERE id = ?', [name, icon, category.id])
       return send(response, 200, { id: Number(category.id), kind: category.kind, name, icon, isDefault: Boolean(category.is_default) })
     } catch (error) { if (error.code === 'ER_DUP_ENTRY') return send(response, 409, { error: 'มีหมวดหมู่นี้อยู่แล้ว' }); throw error }
+  }
+
+  if (pathname === '/api/recurring-rules' && method === 'GET') {
+    const user = await currentUser(request)
+    if (!user) return send(response, 401, { error: 'กรุณาเข้าสู่ระบบ' })
+    const scope = url.searchParams.get('scope') === 'family' ? 'family' : 'personal'
+    const familyId = Number(url.searchParams.get('familyId')) || user.families[0]?.id || 0
+    if (scope === 'family' && !user.families.some((family) => family.id === familyId)) return send(response, 403, { error: 'คุณไม่มีสิทธิ์ดูรายการประจำของครอบครัวนี้' })
+    const [rules] = await pool.execute(`
+      SELECT r.*, c.name AS category_name, u.display_name AS creator_name
+      FROM recurring_rules r LEFT JOIN transaction_categories c ON c.id = r.category_id
+      JOIN users u ON u.id = r.created_by_user_id
+      WHERE r.owner_type = ? AND r.owner_ref = ? AND (r.owner_type = 'family' OR r.created_by_user_id = ?)
+      ORDER BY r.created_at DESC
+    `, [scope === 'family' ? 'family' : 'user', scope === 'family' ? familyId : user.id, user.id])
+    return send(response, 200, rules.map((rule) => ({ id: Number(rule.id), scope, familyId: rule.family_id == null ? null : Number(rule.family_id), kind: rule.kind, title: rule.title, categoryId: rule.category_id == null ? null : Number(rule.category_id), category: rule.category_name, amount: Number(rule.amount), sourceAccountId: Number(rule.source_account_id), destinationAccountId: rule.destination_account_id == null ? null : Number(rule.destination_account_id), owner: rule.owner_name, payer: rule.payer_name, frequency: rule.frequency, intervalCount: Number(rule.interval_count), dayOfMonth: rule.day_of_month == null ? null : Number(rule.day_of_month), startsOn: rule.starts_on, endsOn: rule.ends_on, paused: Boolean(rule.paused_at), createdBy: rule.creator_name, canManage: canManageRecurringRule(user, rule) })))
+  }
+
+  if (pathname === '/api/recurring-rules' && method === 'POST') {
+    const user = await currentUser(request)
+    if (!user) return send(response, 401, { error: 'กรุณาเข้าสู่ระบบ' })
+    const body = await readJson(request)
+    const scope = body.scope; const familyId = Number(body.familyId)
+    const kind = body.kind; const title = String(body.title || '').trim(); const amount = Number(body.amount)
+    const frequency = body.frequency; const intervalCount = Number(body.intervalCount || 1)
+    const dayOfMonth = body.dayOfMonth == null || body.dayOfMonth === '' ? null : Number(body.dayOfMonth)
+    const startsOn = String(body.startsOn || new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Bangkok' }))
+    const endsOn = body.endsOn ? String(body.endsOn) : null
+    const sourceAccountId = Number(body.sourceAccountId); const destinationAccountId = Number(body.destinationAccountId) || null
+    const categoryId = Number(body.categoryId) || null; const owner = String(body.owner || '').trim(); const payer = kind === 'expense' ? String(body.payer || '').trim() : null
+    if (!['personal', 'family'].includes(scope) || !['income', 'expense', 'transfer'].includes(kind) || !title || title.length > 160 || !Number.isFinite(amount) || amount <= 0 || Math.round(amount * 100) !== amount * 100 || !['weekly', 'monthly', 'yearly'].includes(frequency) || !Number.isInteger(intervalCount) || intervalCount < 1 || intervalCount > 52 || !validDateKey(startsOn) || endsOn && (!validDateKey(endsOn) || endsOn < startsOn) || dayOfMonth !== null && (!Number.isInteger(dayOfMonth) || dayOfMonth < 1 || dayOfMonth > 31)) return send(response, 400, { error: 'ข้อมูลรายการประจำไม่ถูกต้อง' })
+    let ownerType = 'user'; let ownerRef = user.id; let ownerUserId = user.id; let scopedFamilyId = null
+    let permittedNames = [user.displayName]
+    if (scope === 'family') {
+      const family = user.families.find((item) => item.id === familyId)
+      if (!family) return send(response, 403, { error: 'คุณไม่มีสิทธิ์สร้างรายการประจำในครอบครัวนี้' })
+      const [members] = await pool.execute('SELECT u.display_name FROM family_members fm JOIN users u ON u.id = fm.user_id WHERE fm.family_id = ? AND fm.left_at IS NULL', [familyId])
+      permittedNames = [...members.map((member) => member.display_name), 'ครอบครัว']
+      ownerType = 'family'; ownerRef = familyId; ownerUserId = null; scopedFamilyId = familyId
+    }
+    if (!sourceAccountId) return send(response, 400, { error: 'เลือกบัญชีเงินก่อนสร้างรายการประจำ' })
+    const source = await accountById(pool, sourceAccountId)
+    if (!await accountVisibleToUser(user, source, scope, scopedFamilyId, 'source', kind)) return send(response, 403, { error: 'ไม่มีสิทธิ์ใช้บัญชีเงินนี้' })
+    let destination = null
+    if (kind === 'transfer') {
+      if (!destinationAccountId || destinationAccountId === sourceAccountId) return send(response, 400, { error: 'เลือกบัญชีปลายทางให้ต่างจากบัญชีต้นทาง' })
+      destination = await accountById(pool, destinationAccountId)
+      if (!await accountVisibleToUser(user, destination, scope, scopedFamilyId, 'destination', kind)) return send(response, 403, { error: 'ไม่มีสิทธิ์ใช้บัญชีปลายทางนี้' })
+    }
+    if (kind !== 'transfer') {
+      const [categories] = await pool.execute('SELECT id FROM transaction_categories WHERE id = ? AND owner_type = ? AND owner_ref = ? AND kind = ? AND archived_at IS NULL', [categoryId, ownerType, ownerRef, kind])
+      if (!categories.length) return send(response, 400, { error: 'เลือกหมวดในขอบเขตนี้ก่อนสร้างรายการประจำ' })
+    }
+    if (!permittedNames.includes(owner) || payer && !permittedNames.includes(payer)) return send(response, 400, { error: 'เจ้าของรายการหรือผู้จ่ายต้องเป็นสมาชิกปัจจุบัน' })
+    const [result] = await pool.execute(`INSERT INTO recurring_rules (owner_type, owner_ref, owner_user_id, family_id, created_by_user_id, kind, title, category_id, amount, source_account_id, destination_account_id, owner_name, payer_name, frequency, interval_count, day_of_month, starts_on, ends_on) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [ownerType, ownerRef, ownerUserId, scopedFamilyId, user.id, kind, title, categoryId, amount, sourceAccountId, destinationAccountId, owner, payer, frequency, intervalCount, dayOfMonth, startsOn, endsOn])
+    return send(response, 201, { id: Number(result.insertId) })
+  }
+
+  if (pathname === '/api/recurring-reviews' && method === 'GET') {
+    const user = await currentUser(request)
+    if (!user) return send(response, 401, { error: 'กรุณาเข้าสู่ระบบ' })
+    const scope = url.searchParams.get('scope') === 'family' ? 'family' : 'personal'
+    const familyId = Number(url.searchParams.get('familyId')) || user.families[0]?.id || 0
+    if (scope === 'family' && !user.families.some((family) => family.id === familyId)) return send(response, 403, { error: 'คุณไม่มีสิทธิ์ดูรายการรอตรวจนี้' })
+    const ownerType = scope === 'family' ? 'family' : 'user'; const ownerRef = scope === 'family' ? familyId : user.id
+    const [rules] = await pool.execute(`SELECT * FROM recurring_rules WHERE owner_type = ? AND owner_ref = ? AND (owner_type = 'family' OR created_by_user_id = ?)`, [ownerType, ownerRef, user.id])
+    const today = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Bangkok', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date())
+    for (const rule of rules) {
+      if (rule.paused_at) continue
+      const reviewDates = recurringReviewDates(rule, today)
+      for (const reviewDate of reviewDates) {
+        const payload = { ruleId: Number(rule.id), kind: rule.kind, title: rule.title, categoryId: rule.category_id == null ? null : Number(rule.category_id), amount: Number(rule.amount), sourceAccountId: Number(rule.source_account_id), destinationAccountId: rule.destination_account_id == null ? null : Number(rule.destination_account_id), owner: rule.owner_name, payer: rule.payer_name, icon: rule.icon, occurredAt: `${reviewDate} 12:00:00` }
+        await pool.execute(`INSERT IGNORE INTO recurring_reviews (recurring_rule_id, cycle_key, review_date, payload) VALUES (?, ?, ?, ?)`, [rule.id, reviewDate, reviewDate, JSON.stringify(payload)])
+      }
+    }
+    const [reviews] = await pool.execute(`
+      SELECT rr.id, rr.cycle_key, rr.review_date, rr.payload, r.owner_type, r.owner_ref, r.created_by_user_id, u.display_name AS creator_name
+      FROM recurring_reviews rr JOIN recurring_rules r ON r.id = rr.recurring_rule_id JOIN users u ON u.id = r.created_by_user_id
+      WHERE r.owner_type = ? AND r.owner_ref = ? AND rr.status = 'pending' AND (r.owner_type = 'family' OR r.created_by_user_id = ?)
+      ORDER BY rr.review_date, rr.id
+    `, [ownerType, ownerRef, user.id])
+    return send(response, 200, reviews.map((review) => ({ id: Number(review.id), cycleKey: review.cycle_key, reviewDate: review.review_date, transaction: typeof review.payload === 'string' ? JSON.parse(review.payload) : review.payload, createdBy: review.creator_name, canManage: canManageRecurringRule(user, { ...review, owner_type: review.owner_type, owner_ref: review.owner_ref }) })))
+  }
+
+  const recurringRuleRoute = pathname.match(/^\/api\/recurring-rules\/(\d+)$/)
+  if (recurringRuleRoute && ['PATCH', 'DELETE'].includes(method)) {
+    const user = await currentUser(request)
+    if (!user) return send(response, 401, { error: 'กรุณาเข้าสู่ระบบ' })
+    const [rows] = await pool.execute('SELECT * FROM recurring_rules WHERE id = ?', [Number(recurringRuleRoute[1])])
+    const rule = rows[0]
+    if (!rule || !canManageRecurringRule(user, rule)) return send(response, 404, { error: 'ไม่พบรายการประจำหรือคุณไม่มีสิทธิ์จัดการ' })
+    if (method === 'DELETE') { await pool.execute('UPDATE recurring_rules SET paused_at = UTC_TIMESTAMP() WHERE id = ?', [rule.id]); return send(response, 200, { ok: true, paused: true }) }
+    const body = await readJson(request)
+    const amount = body.amount === undefined ? Number(rule.amount) : Number(body.amount)
+    const frequency = body.frequency === undefined ? rule.frequency : body.frequency
+    const intervalCount = body.intervalCount === undefined ? Number(rule.interval_count) : Number(body.intervalCount)
+    const dayOfMonth = body.dayOfMonth === undefined ? rule.day_of_month : body.dayOfMonth === null ? null : Number(body.dayOfMonth)
+    const endsOn = body.endsOn === undefined ? rule.ends_on : body.endsOn ? String(body.endsOn) : null
+    if (!Number.isFinite(amount) || amount <= 0 || Math.round(amount * 100) !== amount * 100 || !['weekly', 'monthly', 'yearly'].includes(frequency) || !Number.isInteger(intervalCount) || intervalCount < 1 || intervalCount > 52 || dayOfMonth !== null && (!Number.isInteger(dayOfMonth) || dayOfMonth < 1 || dayOfMonth > 31) || endsOn && (!validDateKey(endsOn) || endsOn < String(rule.starts_on).slice(0, 10))) return send(response, 400, { error: 'ข้อมูลรอบรายการประจำไม่ถูกต้อง' })
+    await pool.execute('UPDATE recurring_rules SET amount = ?, frequency = ?, interval_count = ?, day_of_month = ?, ends_on = ?, paused_at = ? WHERE id = ?', [amount, frequency, intervalCount, dayOfMonth, endsOn, body.paused === false ? null : body.paused === true ? new Date() : rule.paused_at, rule.id])
+    return send(response, 200, { ok: true })
+  }
+
+  const recurringReviewRoute = pathname.match(/^\/api\/recurring-reviews\/(\d+)$/)
+  if (recurringReviewRoute && method === 'POST') {
+    const user = await currentUser(request)
+    if (!user) return send(response, 401, { error: 'กรุณาเข้าสู่ระบบ' })
+    const body = await readJson(request)
+    const action = body.action
+    if (!['confirm', 'dismiss'].includes(action)) return send(response, 400, { error: 'เลือกยืนยันหรือไม่บันทึกรายการนี้' })
+    const connection = await pool.getConnection()
+    try {
+      await connection.beginTransaction()
+      const [rows] = await connection.execute(`SELECT rr.*, r.*, rr.id AS review_id, rr.status AS review_status, rr.payload AS review_payload FROM recurring_reviews rr JOIN recurring_rules r ON r.id = rr.recurring_rule_id WHERE rr.id = ? FOR UPDATE`, [Number(recurringReviewRoute[1])])
+      const review = rows[0]
+      if (!review || review.review_status !== 'pending' || !canManageRecurringRule(user, review)) { await connection.rollback(); return send(response, 404, { error: 'ไม่พบรายการรอตรวจหรือคุณไม่มีสิทธิ์ยืนยัน' }) }
+      if (action === 'dismiss') {
+        await connection.execute(`UPDATE recurring_reviews SET status = 'dismissed', reviewed_by_user_id = ?, reviewed_at = UTC_TIMESTAMP() WHERE id = ?`, [user.id, review.review_id])
+        await connection.commit()
+        return send(response, 200, { ok: true, dismissed: true })
+      }
+      const payload = typeof review.review_payload === 'string' ? JSON.parse(review.review_payload) : review.review_payload
+      const scope = review.owner_type === 'family' ? 'family' : 'personal'
+      const familyId = review.family_id == null ? null : Number(review.family_id)
+      const membership = familyId && user.families.find((family) => family.id === familyId)
+      if (scope === 'family' && !membership) { await connection.rollback(); return send(response, 403, { error: 'คุณออกจากครอบครัวนี้แล้ว' }) }
+      const [members] = scope === 'family' ? await connection.execute('SELECT u.display_name FROM family_members fm JOIN users u ON u.id = fm.user_id WHERE fm.family_id = ? AND fm.left_at IS NULL', [familyId]) : [[{ display_name: user.displayName }]]
+      const permittedNames = [...members.map((member) => member.display_name), ...(scope === 'family' ? ['ครอบครัว'] : [])]
+      if (!permittedNames.includes(payload.owner) || payload.payer && !permittedNames.includes(payload.payer)) { await connection.rollback(); return send(response, 409, { error: 'ผู้รับผิดชอบในรายการประจำไม่ได้เป็นสมาชิกปัจจุบัน กรุณาแก้กติกา' }) }
+      const accountId = payload.sourceAccountId
+      const account = await accountById(connection, accountId)
+      const purpose = payload.kind === 'income' ? 'source' : 'source'
+      if (!await accountVisibleToUser(user, account, scope, familyId, purpose, payload.kind)) { await connection.rollback(); return send(response, 409, { error: 'บัญชีเงินของรายการประจำถูกปิดหรือไม่มีสิทธิ์แล้ว' }) }
+      let destination = null
+      if (payload.kind === 'transfer') {
+        destination = await accountById(connection, payload.destinationAccountId)
+        if (!await accountVisibleToUser(user, destination, scope, familyId, 'destination', 'transfer')) { await connection.rollback(); return send(response, 409, { error: 'บัญชีปลายทางของรายการประจำใช้ไม่ได้แล้ว' }) }
+      }
+      let category = null
+      if (payload.kind !== 'transfer') {
+        const [categories] = await connection.execute('SELECT * FROM transaction_categories WHERE id = ? AND archived_at IS NULL AND kind = ? AND owner_type = ? AND owner_ref = ?', [payload.categoryId, payload.kind, scope === 'family' ? 'family' : 'user', scope === 'family' ? familyId : user.id])
+        category = categories[0]
+        if (!category) { await connection.rollback(); return send(response, 409, { error: 'หมวดของรายการประจำถูกซ่อนแล้ว' }) }
+      }
+      const [result] = await connection.execute(`INSERT INTO transactions (title, category, kind, amount, scope, occurred_at, source_account, destination_account, owner_name, payer_name, recorder_name, icon, created_by_user_id, family_id, category_id, source_account_id, destination_account_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [payload.title, category?.name || 'โอนเงิน', payload.kind, payload.amount, scope, payload.occurredAt, payload.kind === 'income' ? account.name : account.name, payload.kind === 'transfer' ? destination.name : null, payload.owner, payload.payer || null, user.displayName, payload.icon || '🧾', user.id, familyId, category?.id || null, payload.kind === 'income' ? null : account.id, payload.kind === 'income' ? account.id : payload.kind === 'transfer' ? destination.id : null])
+      const transaction = await getTransactionRecord(connection, result.insertId)
+      await auditTransaction(connection, result.insertId, user.id, 'created', null, transactionSnapshot(transaction))
+      await connection.execute(`UPDATE recurring_reviews SET status = 'confirmed', transaction_id = ?, reviewed_by_user_id = ?, reviewed_at = UTC_TIMESTAMP() WHERE id = ?`, [result.insertId, user.id, review.review_id])
+      await connection.commit()
+      return send(response, 201, { ok: true, transaction: await mapTransactionForUser(connection, transaction, user) })
+    } catch (error) { await connection.rollback(); throw error } finally { connection.release() }
   }
 
   if (method === 'POST' && pathname === '/api/receipts') {
@@ -992,7 +1205,19 @@ async function handle(request, response) {
       )` : 'AND t.deleted_at IS NULL'}
       ORDER BY t.occurred_at DESC, t.id DESC
     `, includeTrash ? [user.id, user.id, user.id, user.id, user.id, selectedFamily, user.id, user.id] : [user.id, user.id, user.id, user.id, user.id, selectedFamily])
-    return send(response, 200, rows.map(mapTransaction))
+    const mapped = rows.map(mapTransaction)
+    if (mapped.length) {
+      const ids = mapped.map((row) => row.id)
+      const [allocations] = await pool.query(`SELECT a.transaction_id, a.category_id, c.name AS category, a.owner_user_id, a.owner_is_family, u.display_name AS owner_name, a.amount FROM transaction_allocations a LEFT JOIN transaction_categories c ON c.id = a.category_id LEFT JOIN users u ON u.id = a.owner_user_id WHERE a.transaction_id IN (${ids.map(() => '?').join(',')}) ORDER BY a.id`, ids)
+      const byTransaction = new Map()
+      for (const allocation of allocations) {
+        const bucket = byTransaction.get(Number(allocation.transaction_id)) || []
+        bucket.push({ categoryId: allocation.category_id == null ? null : Number(allocation.category_id), category: allocation.category || null, ownerUserId: allocation.owner_user_id == null ? null : Number(allocation.owner_user_id), ownerName: allocation.owner_is_family ? 'ครอบครัว' : allocation.owner_name, amount: Number(allocation.amount) })
+        byTransaction.set(Number(allocation.transaction_id), bucket)
+      }
+      for (const row of mapped) row.allocations = byTransaction.get(row.id) || []
+    }
+    return send(response, 200, mapped)
   }
 
   if (method === 'POST' && pathname === '/api/transactions') {
@@ -1088,6 +1313,62 @@ async function handle(request, response) {
     } finally { connection.release() }
   }
 
+  const transactionAllocationsRoute = pathname.match(/^\/api\/transactions\/(\d+)\/allocations$/)
+  if (transactionAllocationsRoute && ['GET', 'PUT'].includes(method)) {
+    const user = await currentUser(request)
+    if (!user) return send(response, 401, { error: 'กรุณาเข้าสู่ระบบ' })
+    const transactionId = Number(transactionAllocationsRoute[1])
+    const connection = await pool.getConnection()
+    try {
+      const row = await getTransactionRecord(connection, transactionId)
+      if (!row || !canManageTransaction(user, row) && !(method === 'GET' && row.scope === 'family' && user.families.some((family) => family.id === Number(row.family_id)))) return send(response, 404, { error: 'ไม่พบรายการหรือคุณไม่มีสิทธิ์ดูข้อมูลนี้' })
+      if (method === 'GET') {
+        const [allocations] = await connection.execute(`
+          SELECT a.id, a.category_id, c.name AS category, c.icon, a.owner_user_id, u.display_name AS owner_name,
+            a.owner_is_family, a.amount
+          FROM transaction_allocations a LEFT JOIN transaction_categories c ON c.id = a.category_id
+          LEFT JOIN users u ON u.id = a.owner_user_id WHERE a.transaction_id = ? ORDER BY a.id
+        `, [transactionId])
+        return send(response, 200, allocations.map((item) => ({ id: Number(item.id), categoryId: item.category_id == null ? null : Number(item.category_id), category: item.category, icon: item.icon, ownerUserId: item.owner_user_id == null ? null : Number(item.owner_user_id), ownerName: item.owner_is_family ? 'ครอบครัว' : item.owner_name, amount: Number(item.amount) })))
+      }
+      if (!canManageTransaction(user, row)) return send(response, 403, { error: 'คุณไม่มีสิทธิ์แบ่งรายการนี้' })
+      if (row.deleted_at || row.kind === 'transfer') return send(response, 409, { error: 'รายการในถังขยะหรือรายการโอนไม่สามารถแบ่งสัดส่วนได้' })
+      const body = await readJson(request)
+      if (!Array.isArray(body.allocations) || body.allocations.length < 1 || body.allocations.length > 20) return send(response, 400, { error: 'รายการแบ่งต้องมี 1 ถึง 20 ส่วน' })
+      const allocations = []
+      let totalCents = 0
+      for (const item of body.allocations) {
+        const categoryId = Number(item.categoryId)
+        const cents = Math.round(Number(item.amount) * 100)
+        if (!Number.isInteger(categoryId) || categoryId < 1 || !Number.isFinite(Number(item.amount)) || cents <= 0 || Math.abs(Number(item.amount) * 100 - cents) > 0.000001) return send(response, 400, { error: 'กรอกหมวด จำนวนเงิน และผู้รับผิดชอบแต่ละส่วนให้ถูกต้อง' })
+        const [categories] = await connection.execute('SELECT id FROM transaction_categories WHERE id = ? AND owner_type = ? AND owner_ref = ? AND kind = ? AND archived_at IS NULL', [categoryId, row.scope === 'family' ? 'family' : 'user', row.scope === 'family' ? row.family_id : user.id, row.kind])
+        if (!categories.length) return send(response, 400, { error: 'หมวดของส่วนแบ่งต้องตรงกับขอบเขตและประเภทรายการ' })
+        let ownerUserId = user.id
+        let ownerIsFamily = false
+        if (row.scope === 'family' && item.ownerIsFamily === true) { ownerUserId = null; ownerIsFamily = true }
+        else if (row.scope === 'family') {
+          ownerUserId = Number(item.ownerUserId)
+          const [members] = await connection.execute('SELECT 1 FROM family_members WHERE family_id = ? AND user_id = ? AND left_at IS NULL', [row.family_id, ownerUserId])
+          if (!members.length) return send(response, 400, { error: 'ผู้รับผิดชอบแต่ละส่วนต้องเป็นสมาชิกครอบครัวปัจจุบัน' })
+        }
+        allocations.push({ categoryId, ownerUserId, ownerIsFamily, amount: (cents / 100).toFixed(2) })
+        totalCents += cents
+      }
+      if (totalCents !== Math.round(Number(row.amount) * 100)) return send(response, 400, { error: 'ยอดส่วนแบ่งรวมต้องเท่ากับยอดรายการพอดี' })
+      await connection.beginTransaction()
+      const lockedRow = await getTransactionRecord(connection, transactionId, true)
+      if (!lockedRow || !canManageTransaction(user, lockedRow) || lockedRow.deleted_at || lockedRow.kind === 'transfer' || Math.round(Number(lockedRow.amount) * 100) !== totalCents) { await connection.rollback(); return send(response, 409, { error: 'รายการเปลี่ยนแปลงระหว่างแก้ไข กรุณาโหลดใหม่' }) }
+      const [existing] = await connection.execute('SELECT category_id, owner_user_id, owner_is_family, amount FROM transaction_allocations WHERE transaction_id = ? ORDER BY id', [transactionId])
+      const before = { ...transactionSnapshot(lockedRow), allocations: existing.map((item) => ({ categoryId: item.category_id, ownerUserId: item.owner_user_id, ownerIsFamily: Boolean(item.owner_is_family), amount: String(item.amount) })) }
+      await connection.execute('DELETE FROM transaction_allocations WHERE transaction_id = ?', [transactionId])
+      for (const item of allocations) await connection.execute('INSERT INTO transaction_allocations (transaction_id, category_id, owner_user_id, owner_is_family, amount) VALUES (?, ?, ?, ?, ?)', [transactionId, item.categoryId, item.ownerUserId, item.ownerIsFamily, item.amount])
+      const after = { ...transactionSnapshot(lockedRow), allocations: allocations.map((item) => ({ categoryId: item.categoryId, ownerUserId: item.ownerUserId, ownerIsFamily: item.ownerIsFamily, amount: item.amount })) }
+      await auditTransaction(connection, transactionId, user.id, 'allocations_updated', before, after)
+      await connection.commit()
+      return send(response, 200, { ok: true, allocations })
+    } catch (error) { await connection.rollback(); throw error } finally { connection.release() }
+  }
+
   const transactionHistoryRoute = pathname.match(/^\/api\/transactions\/(\d+)\/history$/)
   if (method === 'GET' && transactionHistoryRoute) {
     const user = await currentUser(request)
@@ -1156,6 +1437,8 @@ async function handle(request, response) {
       }
       if (!['income', 'expense', 'transfer'].includes(values.kind)) { await connection.rollback(); return send(response, 400, { error: 'ประเภทรายการไม่ถูกต้อง' }) }
       if (!Number.isFinite(values.amount) || values.amount <= 0 || Math.round(values.amount * 100) !== values.amount * 100) { await connection.rollback(); return send(response, 400, { error: 'จำนวนเงินต้องมากกว่าศูนย์และไม่เกินสองตำแหน่งทศนิยม' }) }
+      const [[allocationSummary]] = await connection.execute('SELECT COUNT(*) AS allocation_count, COALESCE(SUM(amount), 0) AS allocated_amount FROM transaction_allocations WHERE transaction_id = ?', [transactionId])
+      if (Number(allocationSummary.allocation_count) > 0 && (values.kind !== row.kind || Math.round(Number(values.amount) * 100) !== Math.round(Number(allocationSummary.allocated_amount) * 100))) { await connection.rollback(); return send(response, 409, { error: 'รายการนี้มีส่วนแบ่งแล้ว กรุณาปรับส่วนแบ่งให้ตรงกับยอดใหม่ก่อนเปลี่ยนยอดหรือประเภท' }) }
       if (!values.title || values.title.length > 160 || !values.category || values.category.length > 80 || !values.sourceAccount || values.sourceAccount.length > 100) { await connection.rollback(); return send(response, 400, { error: 'กรอกข้อมูลรายการให้ครบและอยู่ในความยาวที่กำหนด' }) }
       if (values.owner.length > 100 || values.payer?.length > 100) { await connection.rollback(); return send(response, 400, { error: 'ชื่อผู้เกี่ยวข้องยาวเกินกำหนด' }) }
       if (values.kind === 'transfer' && (!values.destinationAccount || values.destinationAccount.length > 100 || values.destinationAccountId === values.sourceAccountId)) { await connection.rollback(); return send(response, 400, { error: 'เลือกบัญชีต้นทางและปลายทางให้ต่างกัน' }) }

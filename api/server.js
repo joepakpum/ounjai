@@ -903,12 +903,15 @@ async function handle(request, response) {
     const body = await readJson(request)
     const fromId = Number(body.fromBudgetId); const toId = Number(body.toBudgetId); const amount = Number(body.amount)
     if (!fromId || !toId || fromId === toId || !Number.isFinite(amount) || amount <= 0 || Math.round(amount * 100) !== amount * 100) return send(response, 400, { error: 'ระบุงบต้นทาง ปลายทาง และจำนวนเงินให้ถูกต้อง' })
-    const [budgets] = await pool.execute('SELECT * FROM budgets WHERE id IN (?, ?) AND archived_at IS NULL', [fromId, toId])
+    const connection = await pool.getConnection()
+    try {
+    await connection.beginTransaction()
+    const [budgets] = await connection.execute('SELECT * FROM budgets WHERE id IN (?, ?) AND archived_at IS NULL ORDER BY id FOR UPDATE', [fromId, toId])
     const from = budgets.find((budget) => Number(budget.id) === fromId); const to = budgets.find((budget) => Number(budget.id) === toId)
-    if (!from || !to || from.owner_type !== to.owner_type || Number(from.owner_ref) !== Number(to.owner_ref)) return send(response, 400, { error: 'ย้ายได้ระหว่างงบในขอบเขตเดียวกันเท่านั้น' })
+    if (!from || !to || from.owner_type !== to.owner_type || Number(from.owner_ref) !== Number(to.owner_ref)) { await connection.rollback(); return send(response, 400, { error: 'ย้ายได้ระหว่างงบในขอบเขตเดียวกันเท่านั้น' }) }
     const allowed = from.owner_type === 'user' && Number(from.owner_user_id) === user.id || from.owner_type === 'family' && user.families.some((family) => family.id === Number(from.family_id) && family.role === 'owner')
-    if (!allowed) return send(response, 403, { error: 'คุณไม่มีสิทธิ์ย้ายงบนี้' })
-    const [[balance]] = await pool.execute(`
+    if (!allowed) { await connection.rollback(); return send(response, 403, { error: 'คุณไม่มีสิทธิ์ย้ายงบนี้' }) }
+    const [[balance]] = await connection.execute(`
       SELECT b.amount + COALESCE((SELECT SUM(CASE WHEN bm.to_budget_id = b.id THEN bm.amount WHEN bm.from_budget_id = b.id THEN -bm.amount ELSE 0 END) FROM budget_movements bm WHERE bm.to_budget_id = b.id OR bm.from_budget_id = b.id), 0)
         - COALESCE((SELECT SUM(t.amount) FROM transactions t WHERE t.category_id = b.category_id AND t.kind = 'expense' AND t.deleted_at IS NULL
           AND NOT EXISTS (SELECT 1 FROM transaction_allocations a WHERE a.transaction_id = t.id)
@@ -923,9 +926,30 @@ async function handle(request, response) {
           AND t.scope = b.owner_type AND ((b.owner_type = 'user' AND t.created_by_user_id = b.owner_user_id) OR (b.owner_type = 'family' AND t.family_id = b.family_id))), 0) AS available
       FROM budgets b WHERE b.id = ?
     `, [fromId])
-    if (Number(balance.available) < amount) return send(response, 409, { error: 'วงเงินคงเหลือหลังหักรายจ่ายไม่พอสำหรับย้าย' })
-    await pool.execute('INSERT INTO budget_movements (owner_type, owner_ref, from_budget_id, to_budget_id, amount, moved_by_user_id, note) VALUES (?, ?, ?, ?, ?, ?, ?)', [from.owner_type, from.owner_ref, fromId, toId, amount, user.id, String(body.note || '').slice(0, 255) || null])
+    if (Number(balance.available) < amount) { await connection.rollback(); return send(response, 409, { error: 'วงเงินคงเหลือหลังหักรายจ่ายไม่พอสำหรับย้าย' }) }
+    await connection.execute('INSERT INTO budget_movements (owner_type, owner_ref, from_budget_id, to_budget_id, amount, moved_by_user_id, note) VALUES (?, ?, ?, ?, ?, ?, ?)', [from.owner_type, from.owner_ref, fromId, toId, amount, user.id, String(body.note || '').slice(0, 255) || null])
+    await connection.commit()
     return send(response, 201, { ok: true })
+    } catch (error) { await connection.rollback(); throw error } finally { connection.release() }
+  }
+
+  if (pathname === '/api/budgets/movements' && method === 'GET') {
+    const user = await currentUser(request)
+    if (!user) return send(response, 401, { error: 'กรุณาเข้าสู่ระบบ' })
+    const scope = url.searchParams.get('scope') === 'family' ? 'family' : 'personal'
+    const familyId = Number(url.searchParams.get('familyId')) || user.families[0]?.id || 0
+    if (scope === 'family' && !user.families.some((family) => family.id === familyId)) return send(response, 403, { error: 'คุณไม่มีสิทธิ์ดูประวัติย้ายงบนี้' })
+    const [rows] = await pool.execute(`
+      SELECT bm.id, bm.amount, bm.note, bm.created_at, c1.name AS from_category, c2.name AS to_category, u.display_name AS moved_by
+      FROM budget_movements bm JOIN budgets b ON b.id = bm.from_budget_id
+      JOIN budgets b2 ON b2.id = bm.to_budget_id
+      JOIN transaction_categories c1 ON c1.id = b.category_id
+      JOIN transaction_categories c2 ON c2.id = b2.category_id
+      JOIN users u ON u.id = bm.moved_by_user_id
+      WHERE bm.owner_type = ? AND bm.owner_ref = ?
+      ORDER BY bm.created_at DESC, bm.id DESC LIMIT 100
+    `, [scope === 'family' ? 'family' : 'user', scope === 'family' ? familyId : user.id])
+    return send(response, 200, rows.map((row) => ({ id: Number(row.id), fromCategory: row.from_category, toCategory: row.to_category, amount: Number(row.amount), note: row.note, movedBy: row.moved_by, createdAt: row.created_at })))
   }
 
   const budgetRoute = pathname.match(/^\/api\/budgets\/(\d+)$/)

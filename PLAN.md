@@ -256,6 +256,7 @@
 ## หลักฐานการตรวจล่าสุดและงานถัดไป
 
 - `node --check api/server.js` และ `npm run build` (web) ผ่าน; MySQL integration บนฐานข้อมูลชั่วคราวที่ clone จาก backup ผ่าน flow สร้างรายรับ/รายจ่าย/โอน, แก้ยอด, แบ่ง 2 ส่วน, trash/restore และคำนวณยอด 10,700 บาทตรง; บัญชีส่วนตัวสมาชิกผู้รับสะท้อนยอดโอน 800 บาท และชื่อบัญชีถูกปิดบังในรายการครอบครัว; ตรวจหน้าเว็บหลัง deploy แล้วโหลดข้อมูลและสถานะ MySQL ได้
+- ตรวจสิทธิ์ภาพสลิปบน MySQL จำลอง: สมาชิกครอบครัวปัจจุบันเปิดภาพได้; ผู้อัปโหลดที่ออกจากครอบครัวได้รับ 404; แก้โค้ดและ deploy แล้ว
 - Migration `007-allocation-audit-action.js` deploy กับ `saving-api`; `/api/health` ภายในคอนเทนเนอร์รายงาน MySQL และ migration row มีอยู่
 - การทดสอบเดิม budget movement บน MySQL แยกผ่านสำเร็จ/ประวัติ/ยอดไม่พอ; backup restore ผ่านใน MySQL ชั่วคราว แต่ยังไม่มี fixture สลิปจริง
 - งานถัดไป: ตรวจ API permissions และ auth/invite flows ให้ครบ; pagination; visual smoke มือถือ/เดสก์ท็อป; OCR และกู้คืนไฟล์สลิปจริง; budget notification/cycle policy; export/delete account; encrypted/offsite/scheduled backup; security gate ก่อน domain

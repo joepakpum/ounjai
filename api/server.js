@@ -1185,8 +1185,11 @@ async function handle(request, response) {
     const [rows] = await pool.execute('SELECT * FROM receipt_attachments WHERE id = ? AND deleted_at IS NULL', [Number(receiptRoute[1])])
     const receipt = rows[0]
     if (!receipt) return send(response, 404, { error: 'ไม่พบภาพสลิป' })
-    const memberOfReceiptFamily = receipt.family_id && user.families.some((family) => family.id === Number(receipt.family_id))
-    if (Number(receipt.owner_user_id) !== user.id && !memberOfReceiptFamily) return send(response, 404, { error: 'ไม่พบภาพสลิป' })
+    const memberOfReceiptFamily = receipt.family_id != null && user.families.some((family) => family.id === Number(receipt.family_id))
+    const canAccessReceipt = receipt.family_id != null
+      ? memberOfReceiptFamily
+      : Number(receipt.owner_user_id) === user.id
+    if (!canAccessReceipt) return send(response, 404, { error: 'ไม่พบภาพสลิป' })
     if (receiptRoute[2] === 'content' && method === 'GET') {
       const image = await readFile(path.join(receiptDirectory, receipt.storage_key))
       response.writeHead(200, { 'content-type': receipt.mime_type, 'content-length': image.length, 'content-disposition': 'inline', 'cache-control': 'private, no-store', 'x-content-type-options': 'nosniff' })

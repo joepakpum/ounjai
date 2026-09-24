@@ -1,5 +1,9 @@
 import http from 'node:http'
 import { createHash, randomBytes } from 'node:crypto'
+import { mkdir, writeFile, readFile, unlink } from 'node:fs/promises'
+import path from 'node:path'
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
 import argon2 from 'argon2'
 import nodemailer from 'nodemailer'
 import mysql from 'mysql2/promise'
@@ -18,6 +22,8 @@ const pool = mysql.createPool({
   charset: 'utf8mb4', waitForConnections: true, connectionLimit: 10,
   decimalNumbers: true, dateStrings: true, timezone: '+07:00',
 })
+const execFileAsync = promisify(execFile)
+const receiptDirectory = process.env.RECEIPT_STORAGE_PATH || '/var/lib/saving/receipts'
 
 const authLimits = new Map()
 const dummyPasswordHash = await argon2.hash(randomBytes(24).toString('base64url'), { type: argon2.argon2id })
@@ -32,7 +38,7 @@ function send(response, status, payload, extraHeaders = {}) {
   response.end(JSON.stringify(payload))
 }
 
-async function readJson(request) {
+async function readJson(request, maximumBytes = 32_000) {
   if (!request.headers['content-type']?.toLowerCase().startsWith('application/json')) {
     const error = new Error('ต้องส่งข้อมูลในรูปแบบ JSON')
     error.status = 415
@@ -42,8 +48,8 @@ async function readJson(request) {
   let size = 0
   for await (const chunk of request) {
     size += chunk.length
-    if (size > 32_000) {
-      const error = new Error('Request body is too large')
+    if (size > maximumBytes) {
+      const error = new Error('ข้อมูลมีขนาดใหญ่เกินกำหนด')
       error.status = 413
       throw error
     }
@@ -59,6 +65,34 @@ async function readJson(request) {
 
 function digest(value) {
   return createHash('sha256').update(value).digest('hex')
+}
+
+function validDateKey(value) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(value))
+  if (!match) return false
+  const date = new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3])))
+  return date.getUTCFullYear() === Number(match[1]) && date.getUTCMonth() + 1 === Number(match[2]) && date.getUTCDate() === Number(match[3])
+}
+
+function validLocalDateTime(value) {
+  if (!/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(value) || !validDateKey(value.slice(0, 10))) return false
+  const [hour, minute, second] = value.slice(11).split(':').map(Number)
+  return hour < 24 && minute < 60 && second < 60
+}
+
+function receiptSuggestions(text) {
+  const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
+  const totalLine = lines.find((line) => /ยอดสุทธิ|ยอดชำระ|รวมทั้งสิ้น|grand total|total/i.test(line))
+  const amountCandidates = (totalLine ? [totalLine] : lines).flatMap((line) => [...line.matchAll(/(?:฿|บาท)?\s*(\d{1,3}(?:,\d{3})*|\d+)\.(\d{2})/g)].map((match) => Number(`${match[1].replaceAll(',', '')}.${match[2]}`)))
+  const amount = amountCandidates.length ? amountCandidates[amountCandidates.length - 1] : null
+  const dateMatch = text.match(/\b(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})\b/)
+  let year = dateMatch ? Number(dateMatch[3]) : 0
+  if (year > 0 && year < 100) year += 2500
+  if (year > 2400) year -= 543
+  const date = dateMatch ? `${year}-${String(Number(dateMatch[2])).padStart(2, '0')}-${String(Number(dateMatch[1])).padStart(2, '0')}` : null
+  const combined = text.toLowerCase()
+  const category = /restaurant|อาหาร|cafe|กาแฟ|food|ข้าว/.test(combined) ? 'อาหาร' : /taxi|grab|เดินทาง|รถไฟ|fuel|น้ำมัน/.test(combined) ? 'เดินทาง' : /pharmacy|hospital|ยา|คลินิก|สุขภาพ/.test(combined) ? 'สุขภาพ' : null
+  return { merchant: lines[0]?.slice(0, 160) || null, amount, date, category, rawText: text.slice(0, 8000) }
 }
 
 function readCookie(request, name) {
@@ -192,6 +226,11 @@ function mapTransaction(row) {
   return {
     id: Number(row.id), title: row.title, category: row.category, kind: row.kind,
     amount: Number(row.amount), scope: row.scope, date, account,
+    occurredAt: `${String(row.occurred_at).replace(' ', 'T')}+07:00`,
+    categoryId: row.category_id == null ? null : Number(row.category_id),
+    sourceAccountId: row.source_account_id == null ? null : Number(row.source_account_id),
+    destinationAccountId: row.destination_account_id == null ? null : Number(row.destination_account_id),
+    receiptId: row.receipt_id == null ? null : Number(row.receipt_id),
     owner: row.owner_name, payer: row.payer_name || undefined,
     recorder: row.recorder_name, icon: row.icon,
   }
@@ -203,11 +242,28 @@ function transactionSnapshot(row) {
     id: Number(row.id), title: row.title, category: row.category, kind: row.kind,
     amount: String(row.amount), scope: row.scope, occurredAt: row.occurred_at,
     sourceAccount: row.source_account, destinationAccount: row.destination_account,
+    sourceAccountId: row.source_account_id == null ? null : Number(row.source_account_id),
+    destinationAccountId: row.destination_account_id == null ? null : Number(row.destination_account_id),
     owner: row.owner_name, payer: row.payer_name, recorder: row.recorder_name,
     icon: row.icon, createdByUserId: Number(row.created_by_user_id),
     familyId: row.family_id == null ? null : Number(row.family_id),
     deletedAt: row.deleted_at, updatedByUserId: row.updated_by_user_id == null ? null : Number(row.updated_by_user_id),
   }
+}
+
+async function mapAuditSnapshotForUser(connection, value, user) {
+  if (!value) return null
+  const snapshot = typeof value === 'string' ? JSON.parse(value) : { ...value }
+  const ids = [...new Set([snapshot.sourceAccountId, snapshot.destinationAccountId].filter(Boolean))]
+  if (snapshot.scope === 'family' && ids.length) {
+    const [accounts] = await connection.query(`SELECT id, owner_type, owner_user_id FROM money_accounts WHERE id IN (${ids.map(() => '?').join(',')})`, ids)
+    const privateIds = new Set(accounts.filter((account) => account.owner_type === 'user' && Number(account.owner_user_id) !== user.id).map((account) => Number(account.id)))
+    if (privateIds.has(Number(snapshot.sourceAccountId))) snapshot.sourceAccount = 'บัญชีสมาชิก'
+    if (privateIds.has(Number(snapshot.destinationAccountId))) snapshot.destinationAccount = 'บัญชีสมาชิก'
+  }
+  delete snapshot.sourceAccountId; delete snapshot.destinationAccountId
+  delete snapshot.createdByUserId; delete snapshot.familyId; delete snapshot.updatedByUserId
+  return snapshot
 }
 
 async function getTransactionRecord(connection, id, lock = false) {
@@ -216,6 +272,29 @@ async function getTransactionRecord(connection, id, lock = false) {
     LEFT JOIN users u ON u.id = t.created_by_user_id WHERE t.id = ? ${lock ? 'FOR UPDATE' : ''}
   `, [id])
   return rows[0] || null
+}
+
+async function mapTransactionForUser(connection, row, user) {
+  if (!row) return null
+  if (row.receipt_id == null) {
+    const [receipts] = await connection.execute('SELECT id FROM receipt_attachments WHERE transaction_id = ? AND deleted_at IS NULL ORDER BY id DESC LIMIT 1', [row.id])
+    row = { ...row, receipt_id: receipts[0]?.id ?? null }
+  }
+  if (row.scope !== 'family') return mapTransaction(row)
+  const sourceId = row.kind === 'income' ? row.destination_account_id : row.source_account_id
+  const destinationId = row.destination_account_id
+  let sourceName = row.source_account
+  let destinationName = row.destination_account
+  const accountIds = [...new Set([sourceId, destinationId].filter(Boolean))]
+  if (accountIds.length) {
+    const [accounts] = await connection.query(`SELECT id, owner_type, owner_user_id FROM money_accounts WHERE id IN (${accountIds.map(() => '?').join(',')})`, accountIds)
+    const accountByKey = new Map(accounts.map((account) => [Number(account.id), account]))
+    const source = sourceId ? accountByKey.get(Number(sourceId)) : null
+    const destination = destinationId ? accountByKey.get(Number(destinationId)) : null
+    if (source?.owner_type === 'user' && Number(source.owner_user_id) !== user.id) sourceName = 'บัญชีสมาชิก'
+    if (destination?.owner_type === 'user' && Number(destination.owner_user_id) !== user.id) destinationName = 'บัญชีสมาชิก'
+  }
+  return mapTransaction({ ...row, source_account: sourceName, destination_account: destinationName })
 }
 
 function canManageTransaction(user, row) {
@@ -229,6 +308,46 @@ async function auditTransaction(connection, transactionId, userId, action, befor
     INSERT INTO transaction_audit_logs (transaction_id, actor_user_id, action, before_snapshot, after_snapshot)
     VALUES (?, ?, ?, ?, ?)
   `, [transactionId, userId, action, before ? JSON.stringify(before) : null, after ? JSON.stringify(after) : null])
+}
+
+async function ensureDefaultAccounts(user) {
+  await pool.execute(`
+    INSERT IGNORE INTO money_accounts (owner_type, owner_ref, owner_user_id, name, account_type, opening_date, created_by_user_id)
+    VALUES ('user', ?, ?, 'เงินสด', 'cash', CURDATE(), ?)
+  `, [user.id, user.id, user.id])
+  for (const family of user.families) {
+    await pool.execute(`
+      INSERT IGNORE INTO money_accounts (owner_type, owner_ref, family_id, name, account_type, opening_date, created_by_user_id)
+      VALUES ('family', ?, ?, 'เงินสดครอบครัว', 'cash', CURDATE(), ?)
+    `, [family.id, family.id, user.id])
+  }
+}
+
+async function ensureDefaultCategories(user) {
+  const defaults = {
+    income: [['เงินเดือน', '💼'], ['โบนัส', '🎁'], ['รายได้เสริม', '✨'], ['ดอกเบี้ย', '🏦'], ['เงินคืน', '↩️'], ['อื่น ๆ', '💰']],
+    expense: [['อาหาร', '🍜'], ['เดินทาง', '🚗'], ['ของใช้ในบ้าน', '🧺'], ['บ้าน', '🏠'], ['การศึกษา', '📚'], ['สุขภาพ', '🩺'], ['ช้อปปิ้ง', '🛍️'], ['อื่น ๆ', '🧾']],
+  }
+  for (const [kind, items] of Object.entries(defaults)) for (const [name, icon] of items) {
+    await pool.execute(`INSERT IGNORE INTO transaction_categories (owner_type, owner_ref, owner_user_id, kind, name, icon, is_default, created_by_user_id) VALUES ('user', ?, ?, ?, ?, ?, TRUE, ?)`, [user.id, user.id, kind, name, icon, user.id])
+    for (const family of user.families) await pool.execute(`INSERT IGNORE INTO transaction_categories (owner_type, owner_ref, family_id, kind, name, icon, is_default, created_by_user_id) VALUES ('family', ?, ?, ?, ?, ?, TRUE, ?)`, [family.id, family.id, kind, name, icon, user.id])
+  }
+}
+
+async function accountById(connection, accountId) {
+  const [rows] = await connection.execute('SELECT * FROM money_accounts WHERE id = ? AND archived_at IS NULL', [accountId])
+  return rows[0] || null
+}
+
+async function accountVisibleToUser(user, account, scope, familyId, purpose = 'source', kind = 'expense') {
+  if (!account || account.archived_at) return false
+  if (scope === 'personal') return account.owner_type === 'user' && Number(account.owner_user_id) === user.id
+  if (account.owner_type === 'family') return Number(account.family_id) === Number(familyId) && user.families.some((family) => family.id === Number(familyId))
+  if (account.owner_type !== 'user') return false
+  if (Number(account.owner_user_id) === user.id) return true
+  if (purpose !== 'destination' || kind !== 'transfer' || !user.families.some((family) => family.id === Number(familyId))) return false
+  const [membership] = await pool.execute('SELECT 1 FROM family_members WHERE family_id = ? AND user_id = ? AND left_at IS NULL', [familyId, account.owner_user_id])
+  return membership.length > 0
 }
 
 async function handle(request, response) {
@@ -520,6 +639,326 @@ async function handle(request, response) {
     } finally { connection.release() }
   }
 
+  if (pathname === '/api/accounts' && method === 'GET') {
+    const user = await currentUser(request)
+    if (!user) return send(response, 401, { error: 'กรุณาเข้าสู่ระบบ' })
+    await ensureDefaultAccounts(user)
+    const scope = url.searchParams.get('scope') === 'family' ? 'family' : 'personal'
+    const requestedFamily = Number(url.searchParams.get('familyId'))
+    const familyId = requestedFamily || user.families[0]?.id || 0
+    if (scope === 'family' && !user.families.some((family) => family.id === familyId)) return send(response, 403, { error: 'คุณไม่มีสิทธิ์ดูบัญชีเงินครอบครัวนี้' })
+    const ownerFilter = scope === 'personal' ? 'a.owner_type = \'user\' AND a.owner_user_id = ?' : 'a.owner_type = \'family\' AND a.family_id = ?'
+    const ownerId = scope === 'personal' ? user.id : familyId
+    const [accounts] = await pool.execute(`
+      SELECT a.id, a.owner_type, a.owner_user_id, a.family_id, a.name, a.account_type,
+        a.opening_balance, a.opening_date,
+        a.opening_balance + COALESCE(SUM(CASE
+          WHEN t.kind = 'income' AND t.destination_account_id = a.id THEN t.amount
+          WHEN t.kind = 'expense' AND t.source_account_id = a.id THEN -t.amount
+          WHEN t.kind = 'transfer' AND t.source_account_id = a.id THEN -t.amount
+          WHEN t.kind = 'transfer' AND t.destination_account_id = a.id THEN t.amount
+          ELSE 0 END), 0) AS balance
+      FROM money_accounts a LEFT JOIN transactions t ON (t.source_account_id = a.id OR t.destination_account_id = a.id)
+        AND t.deleted_at IS NULL AND DATE(t.occurred_at) >= a.opening_date
+      WHERE ${ownerFilter} AND a.archived_at IS NULL
+      GROUP BY a.id ORDER BY a.account_type, a.name
+    `, [ownerId])
+    return send(response, 200, accounts.map((account) => ({ id: Number(account.id), ownerType: account.owner_type, ownerUserId: account.owner_user_id ? Number(account.owner_user_id) : null, familyId: account.family_id ? Number(account.family_id) : null, name: account.name, accountType: account.account_type, openingBalance: Number(account.opening_balance), openingDate: account.opening_date, balance: Number(account.balance) })))
+  }
+
+  const transferRecipientsRoute = pathname.match(/^\/api\/families\/(\d+)\/transfer-recipients$/)
+  if (method === 'GET' && transferRecipientsRoute) {
+    const user = await currentUser(request)
+    if (!user) return send(response, 401, { error: 'กรุณาเข้าสู่ระบบ' })
+    const familyId = Number(transferRecipientsRoute[1])
+    if (!user.families.some((family) => family.id === familyId)) return send(response, 403, { error: 'คุณไม่มีสิทธิ์ดูสมาชิกครอบครัวนี้' })
+    const [accounts] = await pool.execute(`
+      SELECT a.id, a.owner_user_id, u.display_name, a.account_type
+      FROM money_accounts a JOIN family_members fm ON fm.user_id = a.owner_user_id AND fm.family_id = ? AND fm.left_at IS NULL
+      JOIN users u ON u.id = a.owner_user_id
+      WHERE a.owner_type = 'user' AND a.archived_at IS NULL AND a.owner_user_id <> ?
+      ORDER BY u.display_name, a.account_type, a.id
+    `, [familyId, user.id])
+    return send(response, 200, accounts.map((account) => ({ id: Number(account.id), ownerName: account.display_name, accountType: account.account_type })))
+  }
+
+  if (pathname === '/api/accounts' && method === 'POST') {
+    const user = await currentUser(request)
+    if (!user) return send(response, 401, { error: 'กรุณาเข้าสู่ระบบ' })
+    const body = await readJson(request)
+    const scope = body.scope
+    const familyId = Number(body.familyId)
+    const name = String(body.name || '').trim()
+    const accountType = body.accountType
+    const openingBalance = Number(body.openingBalance || 0)
+    const openingDate = String(body.openingDate || new Date().toISOString().slice(0, 10))
+    if (!['personal', 'family'].includes(scope) || !name || name.length > 100 || !['cash', 'bank', 'other'].includes(accountType)) return send(response, 400, { error: 'กรอกชื่อ ขอบเขต และประเภทบัญชีให้ถูกต้อง' })
+    if (!Number.isFinite(openingBalance) || Math.round(openingBalance * 100) !== openingBalance * 100 || !validDateKey(openingDate)) return send(response, 400, { error: 'ยอดตั้งต้นหรือวันที่ไม่ถูกต้อง' })
+    let ownerType = 'user'; let ownerRef = user.id; let ownerUserId = user.id; let family = null
+    if (scope === 'family') {
+      family = user.families.find((item) => item.id === familyId)
+      if (!family) return send(response, 403, { error: 'คุณไม่มีสิทธิ์สร้างบัญชีในครอบครัวนี้' })
+      if (family.role !== 'owner') return send(response, 403, { error: 'เฉพาะเจ้าของครอบครัวจัดการบัญชีเงินครอบครัวได้' })
+      ownerType = 'family'; ownerRef = familyId; ownerUserId = null
+    }
+    try {
+      const [result] = await pool.execute(`
+        INSERT INTO money_accounts (owner_type, owner_ref, owner_user_id, family_id, name, account_type, opening_balance, opening_date, created_by_user_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `, [ownerType, ownerRef, ownerUserId, scope === 'family' ? familyId : null, name, accountType, openingBalance, openingDate, user.id])
+      return send(response, 201, { id: Number(result.insertId), ownerType, ownerUserId, familyId: scope === 'family' ? familyId : null, name, accountType, openingBalance, openingDate, balance: openingBalance })
+    } catch (error) { if (error.code === 'ER_DUP_ENTRY') return send(response, 409, { error: 'มีบัญชีชื่อนี้อยู่แล้ว' }); throw error }
+  }
+
+  const accountRoute = pathname.match(/^\/api\/accounts\/(\d+)$/)
+  if (accountRoute && ['PATCH', 'DELETE'].includes(method)) {
+    const user = await currentUser(request)
+    if (!user) return send(response, 401, { error: 'กรุณาเข้าสู่ระบบ' })
+    const account = await accountById(pool, Number(accountRoute[1]))
+    if (!account) return send(response, 404, { error: 'ไม่พบบัญชีเงิน' })
+    const allowed = account.owner_type === 'user' && Number(account.owner_user_id) === user.id
+      || account.owner_type === 'family' && user.families.some((family) => family.id === Number(account.family_id) && family.role === 'owner')
+    if (!allowed) return send(response, 403, { error: 'คุณไม่มีสิทธิ์จัดการบัญชีเงินนี้' })
+    if (method === 'DELETE') {
+      await pool.execute('UPDATE money_accounts SET archived_at = UTC_TIMESTAMP() WHERE id = ?', [account.id])
+      return send(response, 200, { ok: true })
+    }
+    const body = await readJson(request)
+    const name = body.name === undefined ? account.name : String(body.name).trim()
+    const accountType = body.accountType === undefined ? account.account_type : body.accountType
+    const openingBalance = body.openingBalance === undefined ? Number(account.opening_balance) : Number(body.openingBalance)
+    const openingDate = body.openingDate === undefined ? account.opening_date : String(body.openingDate)
+    if (!name || name.length > 100 || !['cash', 'bank', 'other'].includes(accountType) || !Number.isFinite(openingBalance) || Math.round(openingBalance * 100) !== openingBalance * 100 || !validDateKey(openingDate)) return send(response, 400, { error: 'ข้อมูลบัญชีเงินไม่ถูกต้อง' })
+    try {
+      await pool.execute('UPDATE money_accounts SET name = ?, account_type = ?, opening_balance = ?, opening_date = ? WHERE id = ?', [name, accountType, openingBalance, openingDate, account.id])
+      return send(response, 200, { id: Number(account.id), name, accountType, openingBalance, openingDate })
+    } catch (error) { if (error.code === 'ER_DUP_ENTRY') return send(response, 409, { error: 'มีบัญชีชื่อนี้อยู่แล้ว' }); throw error }
+  }
+
+  if (pathname === '/api/categories' && method === 'GET') {
+    const user = await currentUser(request)
+    if (!user) return send(response, 401, { error: 'กรุณาเข้าสู่ระบบ' })
+    await ensureDefaultCategories(user)
+    const kind = url.searchParams.get('kind')
+    if (kind && !['income', 'expense'].includes(kind)) return send(response, 400, { error: 'ประเภทหมวดหมู่ไม่ถูกต้อง' })
+    const scope = url.searchParams.get('scope') === 'family' ? 'family' : 'personal'
+    const requestedFamily = Number(url.searchParams.get('familyId'))
+    const familyId = requestedFamily || user.families[0]?.id || 0
+    if (scope === 'family' && !user.families.some((family) => family.id === familyId)) return send(response, 403, { error: 'คุณไม่มีสิทธิ์ดูหมวดหมู่ครอบครัวนี้' })
+    const [categories] = await pool.execute(`
+      SELECT id, owner_type, owner_ref, kind, name, icon, is_default FROM transaction_categories
+      WHERE owner_type = ? AND owner_ref = ? AND archived_at IS NULL ${kind ? 'AND kind = ?' : ''}
+      ORDER BY kind, is_default DESC, name
+    `, [scope === 'family' ? 'family' : 'user', scope === 'family' ? familyId : user.id, ...(kind ? [kind] : [])])
+    return send(response, 200, categories.map((category) => ({ id: Number(category.id), ownerType: category.owner_type, ownerRef: Number(category.owner_ref), kind: category.kind, name: category.name, icon: category.icon, isDefault: Boolean(category.is_default) })))
+  }
+
+  if (pathname === '/api/categories' && method === 'POST') {
+    const user = await currentUser(request)
+    if (!user) return send(response, 401, { error: 'กรุณาเข้าสู่ระบบ' })
+    const body = await readJson(request)
+    const scope = body.scope
+    const familyId = Number(body.familyId)
+    const kind = body.kind
+    const name = String(body.name || '').trim()
+    const icon = String(body.icon || '🧾').slice(0, 12)
+    if (!['personal', 'family'].includes(scope) || !['income', 'expense'].includes(kind) || !name || name.length > 80) return send(response, 400, { error: 'ข้อมูลหมวดหมู่ไม่ถูกต้อง' })
+    let ownerType = 'user'; let ownerRef = user.id; let ownerUserId = user.id
+    if (scope === 'family') {
+      const family = user.families.find((item) => item.id === familyId)
+      if (!family || family.role !== 'owner') return send(response, 403, { error: 'เฉพาะเจ้าของครอบครัวจัดการหมวดหมู่ครอบครัวได้' })
+      ownerType = 'family'; ownerRef = familyId; ownerUserId = null
+    }
+    try {
+      const [result] = await pool.execute(`INSERT INTO transaction_categories (owner_type, owner_ref, owner_user_id, family_id, kind, name, icon, created_by_user_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, [ownerType, ownerRef, ownerUserId, scope === 'family' ? familyId : null, kind, name, icon, user.id])
+      return send(response, 201, { id: Number(result.insertId), kind, name, icon, isDefault: false })
+    } catch (error) { if (error.code === 'ER_DUP_ENTRY') return send(response, 409, { error: 'มีหมวดหมู่นี้อยู่แล้ว' }); throw error }
+  }
+
+  if (pathname === '/api/budgets' && method === 'GET') {
+    const user = await currentUser(request)
+    if (!user) return send(response, 401, { error: 'กรุณาเข้าสู่ระบบ' })
+    const scope = url.searchParams.get('scope') === 'family' ? 'family' : 'personal'
+    const familyId = Number(url.searchParams.get('familyId')) || user.families[0]?.id || 0
+    if (scope === 'family' && !user.families.some((family) => family.id === familyId)) return send(response, 403, { error: 'คุณไม่มีสิทธิ์ดูงบครอบครัวนี้' })
+    const ownerRef = scope === 'family' ? familyId : user.id
+    const [rows] = await pool.execute(`
+      SELECT b.id, b.owner_type, b.owner_ref, b.category_id,
+        b.amount + COALESCE((SELECT SUM(CASE WHEN bm.to_budget_id = b.id THEN bm.amount WHEN bm.from_budget_id = b.id THEN -bm.amount ELSE 0 END) FROM budget_movements bm WHERE bm.to_budget_id = b.id OR bm.from_budget_id = b.id), 0) AS amount,
+        b.period_type, b.cycle_start_day,
+        b.period_start, b.period_end, b.alert_percent, c.name AS category_name, c.icon,
+        COALESCE((SELECT SUM(t.amount) FROM transactions t WHERE t.category_id = b.category_id AND t.kind = 'expense' AND t.deleted_at IS NULL
+          AND ((b.period_type = 'monthly' AND DATE(t.occurred_at) >= CASE
+            WHEN DAY(CURDATE()) >= b.cycle_start_day THEN DATE_ADD(DATE_FORMAT(CURDATE(), '%Y-%m-01'), INTERVAL b.cycle_start_day - 1 DAY)
+            ELSE DATE_ADD(DATE_FORMAT(DATE_SUB(CURDATE(), INTERVAL 1 MONTH), '%Y-%m-01'), INTERVAL b.cycle_start_day - 1 DAY) END
+            AND DATE(t.occurred_at) < CASE WHEN DAY(CURDATE()) >= b.cycle_start_day
+            THEN DATE_ADD(DATE_ADD(DATE_FORMAT(CURDATE(), '%Y-%m-01'), INTERVAL b.cycle_start_day - 1 DAY), INTERVAL 1 MONTH)
+            ELSE DATE_ADD(DATE_ADD(DATE_FORMAT(DATE_SUB(CURDATE(), INTERVAL 1 MONTH), '%Y-%m-01'), INTERVAL b.cycle_start_day - 1 DAY), INTERVAL 1 MONTH) END)
+            OR (b.period_type = 'custom' AND DATE(t.occurred_at) BETWEEN b.period_start AND b.period_end))
+          AND t.scope = b.owner_type AND ((b.owner_type = 'user' AND t.created_by_user_id = b.owner_user_id) OR (b.owner_type = 'family' AND t.family_id = b.family_id))), 0) AS spent
+      FROM budgets b JOIN transaction_categories c ON c.id = b.category_id
+      WHERE b.owner_type = ? AND b.owner_ref = ? AND b.archived_at IS NULL
+      ORDER BY c.name
+    `, [scope === 'family' ? 'family' : 'user', ownerRef])
+    return send(response, 200, rows.map((row) => ({ id: Number(row.id), ownerType: row.owner_type, ownerRef: Number(row.owner_ref), categoryId: Number(row.category_id), category: row.category_name, icon: row.icon, amount: Number(row.amount), spent: Number(row.spent), periodType: row.period_type, cycleStartDay: Number(row.cycle_start_day), periodStart: row.period_start, periodEnd: row.period_end, alertPercent: Number(row.alert_percent) })))
+  }
+
+  if (pathname === '/api/budgets' && method === 'POST') {
+    const user = await currentUser(request)
+    if (!user) return send(response, 401, { error: 'กรุณาเข้าสู่ระบบ' })
+    const body = await readJson(request)
+    const scope = body.scope
+    const familyId = Number(body.familyId)
+    const categoryId = Number(body.categoryId)
+    const amount = Number(body.amount)
+    const periodType = body.periodType === 'custom' ? 'custom' : 'monthly'
+    const cycleStartDay = Number(body.cycleStartDay || 1)
+    const periodStart = body.periodStart ? String(body.periodStart) : null
+    const periodEnd = body.periodEnd ? String(body.periodEnd) : null
+    const alertPercent = Number(body.alertPercent || 80)
+    if (!['personal', 'family'].includes(scope) || !Number.isFinite(amount) || amount <= 0 || Math.round(amount * 100) !== amount * 100 || !Number.isInteger(alertPercent) || alertPercent < 1 || alertPercent > 100) return send(response, 400, { error: 'ข้อมูลวงเงินหรือการแจ้งเตือนไม่ถูกต้อง' })
+    let ownerType = 'user'; let ownerRef = user.id; let ownerUserId = user.id
+    if (scope === 'family') {
+      const family = user.families.find((item) => item.id === familyId)
+      if (!family || family.role !== 'owner') return send(response, 403, { error: 'เฉพาะเจ้าของครอบครัวจัดการงบครอบครัวได้' })
+      ownerType = 'family'; ownerRef = familyId; ownerUserId = null
+    }
+    if (periodType === 'monthly' && (!Number.isInteger(cycleStartDay) || cycleStartDay < 1 || cycleStartDay > 28)) return send(response, 400, { error: 'วันเริ่มรอบต้องอยู่ระหว่างวันที่ 1 ถึง 28' })
+    if (periodType === 'custom' && (!validDateKey(periodStart) || !validDateKey(periodEnd) || periodEnd < periodStart)) return send(response, 400, { error: 'กรุณากำหนดวันเริ่มและวันสิ้นสุดให้ถูกต้อง' })
+    const [categories] = await pool.execute('SELECT id FROM transaction_categories WHERE id = ? AND owner_type = ? AND owner_ref = ? AND kind = \'expense\' AND archived_at IS NULL', [categoryId, ownerType, ownerRef])
+    if (!categories.length) return send(response, 400, { error: 'เลือกหมวดรายจ่ายในขอบเขตเดียวกัน' })
+    const [result] = await pool.execute(`INSERT INTO budgets (owner_type, owner_ref, owner_user_id, family_id, category_id, amount, period_type, cycle_start_day, period_start, period_end, alert_percent, created_by_user_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [ownerType, ownerRef, ownerUserId, scope === 'family' ? familyId : null, categoryId, amount, periodType, cycleStartDay, periodStart, periodEnd, alertPercent, user.id])
+    return send(response, 201, { id: Number(result.insertId) })
+  }
+
+  if (pathname === '/api/budgets/movements' && method === 'POST') {
+    const user = await currentUser(request)
+    if (!user) return send(response, 401, { error: 'กรุณาเข้าสู่ระบบ' })
+    const body = await readJson(request)
+    const fromId = Number(body.fromBudgetId); const toId = Number(body.toBudgetId); const amount = Number(body.amount)
+    if (!fromId || !toId || fromId === toId || !Number.isFinite(amount) || amount <= 0 || Math.round(amount * 100) !== amount * 100) return send(response, 400, { error: 'ระบุงบต้นทาง ปลายทาง และจำนวนเงินให้ถูกต้อง' })
+    const [budgets] = await pool.execute('SELECT * FROM budgets WHERE id IN (?, ?) AND archived_at IS NULL', [fromId, toId])
+    const from = budgets.find((budget) => Number(budget.id) === fromId); const to = budgets.find((budget) => Number(budget.id) === toId)
+    if (!from || !to || from.owner_type !== to.owner_type || Number(from.owner_ref) !== Number(to.owner_ref)) return send(response, 400, { error: 'ย้ายได้ระหว่างงบในขอบเขตเดียวกันเท่านั้น' })
+    const allowed = from.owner_type === 'user' && Number(from.owner_user_id) === user.id || from.owner_type === 'family' && user.families.some((family) => family.id === Number(from.family_id) && family.role === 'owner')
+    if (!allowed) return send(response, 403, { error: 'คุณไม่มีสิทธิ์ย้ายงบนี้' })
+    const [[balance]] = await pool.execute(`SELECT b.amount + COALESCE(SUM(CASE WHEN bm.to_budget_id = b.id THEN bm.amount WHEN bm.from_budget_id = b.id THEN -bm.amount ELSE 0 END), 0) AS available FROM budgets b LEFT JOIN budget_movements bm ON bm.from_budget_id = b.id OR bm.to_budget_id = b.id WHERE b.id = ? GROUP BY b.id`, [fromId])
+    if (Number(balance.available) < amount) return send(response, 409, { error: 'วงเงินต้นทางไม่พอสำหรับย้าย' })
+    await pool.execute('INSERT INTO budget_movements (owner_type, owner_ref, from_budget_id, to_budget_id, amount, moved_by_user_id, note) VALUES (?, ?, ?, ?, ?, ?, ?)', [from.owner_type, from.owner_ref, fromId, toId, amount, user.id, String(body.note || '').slice(0, 255) || null])
+    return send(response, 201, { ok: true })
+  }
+
+  const budgetRoute = pathname.match(/^\/api\/budgets\/(\d+)$/)
+  if (budgetRoute && ['PATCH', 'DELETE'].includes(method)) {
+    const user = await currentUser(request)
+    if (!user) return send(response, 401, { error: 'กรุณาเข้าสู่ระบบ' })
+    const [rows] = await pool.execute('SELECT * FROM budgets WHERE id = ? AND archived_at IS NULL', [Number(budgetRoute[1])])
+    const budget = rows[0]
+    if (!budget) return send(response, 404, { error: 'ไม่พบงบประมาณ' })
+    const allowed = budget.owner_type === 'user' && Number(budget.owner_user_id) === user.id || budget.owner_type === 'family' && user.families.some((family) => family.id === Number(budget.family_id) && family.role === 'owner')
+    if (!allowed) return send(response, 403, { error: 'คุณไม่มีสิทธิ์จัดการงบนี้' })
+    if (method === 'DELETE') { await pool.execute('UPDATE budgets SET archived_at = UTC_TIMESTAMP() WHERE id = ?', [budget.id]); return send(response, 200, { ok: true }) }
+    const body = await readJson(request)
+    const amount = body.amount === undefined ? Number(budget.amount) : Number(body.amount)
+    const alertPercent = body.alertPercent === undefined ? Number(budget.alert_percent) : Number(body.alertPercent)
+    const cycleStartDay = body.cycleStartDay === undefined ? Number(budget.cycle_start_day) : Number(body.cycleStartDay)
+    if (!Number.isFinite(amount) || amount <= 0 || Math.round(amount * 100) !== amount * 100 || !Number.isInteger(alertPercent) || alertPercent < 1 || alertPercent > 100 || budget.period_type === 'monthly' && (!Number.isInteger(cycleStartDay) || cycleStartDay < 1 || cycleStartDay > 28)) return send(response, 400, { error: 'วงเงิน รอบเวลา หรือค่าเตือนไม่ถูกต้อง' })
+    await pool.execute('UPDATE budgets SET amount = ?, alert_percent = ?, cycle_start_day = ? WHERE id = ?', [amount, alertPercent, cycleStartDay, budget.id])
+    return send(response, 200, { ok: true })
+  }
+
+  const categoryRoute = pathname.match(/^\/api\/categories\/(\d+)$/)
+  if (categoryRoute && ['PATCH', 'DELETE'].includes(method)) {
+    const user = await currentUser(request)
+    if (!user) return send(response, 401, { error: 'กรุณาเข้าสู่ระบบ' })
+    const [rows] = await pool.execute('SELECT * FROM transaction_categories WHERE id = ? AND archived_at IS NULL', [Number(categoryRoute[1])])
+    const category = rows[0]
+    if (!category) return send(response, 404, { error: 'ไม่พบหมวดหมู่' })
+    const allowed = category.owner_type === 'user' && Number(category.owner_user_id) === user.id
+      || category.owner_type === 'family' && user.families.some((family) => family.id === Number(category.family_id) && family.role === 'owner')
+    if (!allowed) return send(response, 403, { error: 'คุณไม่มีสิทธิ์จัดการหมวดหมู่นี้' })
+    if (method === 'DELETE') {
+      await pool.execute('UPDATE transaction_categories SET archived_at = UTC_TIMESTAMP() WHERE id = ?', [category.id])
+      return send(response, 200, { ok: true })
+    }
+    const body = await readJson(request)
+    const name = body.name === undefined ? category.name : String(body.name).trim()
+    const icon = body.icon === undefined ? category.icon : String(body.icon).slice(0, 12)
+    if (!name || name.length > 80) return send(response, 400, { error: 'ชื่อหมวดหมู่ไม่ถูกต้อง' })
+    try {
+      await pool.execute('UPDATE transaction_categories SET name = ?, icon = ? WHERE id = ?', [name, icon, category.id])
+      return send(response, 200, { id: Number(category.id), kind: category.kind, name, icon, isDefault: Boolean(category.is_default) })
+    } catch (error) { if (error.code === 'ER_DUP_ENTRY') return send(response, 409, { error: 'มีหมวดหมู่นี้อยู่แล้ว' }); throw error }
+  }
+
+  if (method === 'POST' && pathname === '/api/receipts') {
+    if (rateLimit(request, response, 'receipt-upload', 5)) return
+    const user = await currentUser(request)
+    if (!user) return send(response, 401, { error: 'กรุณาเข้าสู่ระบบ' })
+    const body = await readJson(request, 8_500_000)
+    const mimeType = String(body.mimeType || '')
+    const extension = ({ 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp' })[mimeType]
+    const encoded = String(body.data || '').replace(/^data:[^,]+,/, '')
+    if (!extension || !/^[A-Za-z0-9+/]*={0,2}$/.test(encoded)) return send(response, 400, { error: 'รองรับไฟล์ภาพ JPEG, PNG หรือ WebP เท่านั้น' })
+    const buffer = Buffer.from(encoded, 'base64')
+    if (!buffer.length || buffer.length > 6 * 1024 * 1024) return send(response, 413, { error: 'ภาพต้องมีขนาดไม่เกิน 6 MB' })
+    const signatures = { jpg: buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff, png: buffer.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])), webp: buffer.subarray(0, 4).toString() === 'RIFF' && buffer.subarray(8, 12).toString() === 'WEBP' }
+    if (!signatures[extension]) return send(response, 400, { error: 'เนื้อหาไฟล์ไม่ตรงกับชนิดภาพที่ระบุ' })
+    const scope = body.scope === 'family' ? 'family' : 'personal'
+    const familyId = Number(body.familyId) || null
+    if (scope === 'family' && (!familyId || !user.families.some((family) => family.id === familyId))) return send(response, 403, { error: 'คุณไม่มีสิทธิ์แนบภาพในครอบครัวนี้' })
+    const storageKey = `${randomBytes(24).toString('hex')}.${extension}`
+    const filePath = path.join(receiptDirectory, storageKey)
+    await mkdir(receiptDirectory, { recursive: true })
+    await writeFile(filePath, buffer, { flag: 'wx', mode: 0o600 })
+    let extracted = { merchant: null, amount: null, date: null, category: null, rawText: '' }
+    let status = 'failed'
+    let ocrAvailable = true
+    try {
+      const { stdout } = await execFileAsync('tesseract', [filePath, 'stdout', '-l', 'tha+eng', '--psm', '6'], { timeout: 30_000, maxBuffer: 1_000_000 })
+      extracted = receiptSuggestions(stdout)
+      status = stdout.trim() ? 'pending_review' : 'failed'
+    } catch { ocrAvailable = false }
+    try {
+      const [result] = await pool.execute(`INSERT INTO receipt_attachments (owner_user_id, family_id, storage_key, original_name, mime_type, size_bytes, content_sha256, processing_status, extracted_data) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, [user.id, scope === 'family' ? familyId : null, storageKey, path.basename(String(body.fileName || 'receipt').slice(0, 255)), mimeType, buffer.length, createHash('sha256').update(buffer).digest('hex'), status, JSON.stringify(extracted)])
+      return send(response, 201, { id: Number(result.insertId), status, ocrAvailable, extracted })
+    } catch (error) { await unlink(filePath).catch(() => {}); throw error }
+  }
+
+  const receiptRoute = pathname.match(/^\/api\/receipts\/(\d+)(?:\/(content|attach))?$/)
+  if (receiptRoute && (method === 'GET' || method === 'DELETE' || method === 'POST')) {
+    const user = await currentUser(request)
+    if (!user) return send(response, 401, { error: 'กรุณาเข้าสู่ระบบ' })
+    const [rows] = await pool.execute('SELECT * FROM receipt_attachments WHERE id = ? AND deleted_at IS NULL', [Number(receiptRoute[1])])
+    const receipt = rows[0]
+    if (!receipt) return send(response, 404, { error: 'ไม่พบภาพสลิป' })
+    const memberOfReceiptFamily = receipt.family_id && user.families.some((family) => family.id === Number(receipt.family_id))
+    if (Number(receipt.owner_user_id) !== user.id && !memberOfReceiptFamily) return send(response, 404, { error: 'ไม่พบภาพสลิป' })
+    if (receiptRoute[2] === 'content' && method === 'GET') {
+      const image = await readFile(path.join(receiptDirectory, receipt.storage_key))
+      response.writeHead(200, { 'content-type': receipt.mime_type, 'content-length': image.length, 'content-disposition': 'inline', 'cache-control': 'private, no-store', 'x-content-type-options': 'nosniff' })
+      return response.end(image)
+    }
+    if (receiptRoute[2] === 'attach' && method === 'POST') {
+      const body = await readJson(request)
+      const [transactions] = await pool.execute('SELECT * FROM transactions WHERE id = ? AND deleted_at IS NULL', [Number(body.transactionId)])
+      const transaction = transactions[0]
+      if (!transaction || !canManageTransaction(user, transaction) || (receipt.family_id && Number(transaction.family_id) !== Number(receipt.family_id)) || (!receipt.family_id && transaction.scope !== 'personal')) return send(response, 404, { error: 'ไม่พบรายการที่สามารถแนบภาพนี้ได้' })
+      await pool.execute('UPDATE receipt_attachments SET transaction_id = ?, processing_status = IF(processing_status = \'failed\', \'failed\', \'confirmed\') WHERE id = ?', [transaction.id, receipt.id])
+      return send(response, 200, { ok: true })
+    }
+    if (method === 'DELETE') {
+      const [transactions] = receipt.transaction_id ? await pool.execute('SELECT * FROM transactions WHERE id = ?', [receipt.transaction_id]) : [[]]
+      const transaction = transactions[0]
+      const familyOwner = transaction?.family_id && user.families.some((family) => family.id === Number(transaction.family_id) && family.role === 'owner')
+      if (Number(receipt.owner_user_id) !== user.id && !familyOwner) return send(response, 403, { error: 'คุณไม่มีสิทธิ์ลบภาพนี้' })
+      await pool.execute('UPDATE receipt_attachments SET deleted_at = UTC_TIMESTAMP() WHERE id = ?', [receipt.id])
+      await unlink(path.join(receiptDirectory, receipt.storage_key)).catch(() => {})
+      return send(response, 200, { ok: true })
+    }
+    return send(response, 404, { error: 'ไม่พบเส้นทางนี้' })
+  }
+
   if (method === 'GET' && pathname === '/api/transactions') {
     const user = await currentUser(request)
     if (!user) return send(response, 401, { error: 'กรุณาเข้าสู่ระบบ' })
@@ -527,11 +966,18 @@ async function handle(request, response) {
     const requestedFamily = Number(url.searchParams.get('familyId'))
     const selectedFamily = requestedFamily || user.families[0]?.id || 0
     const [rows] = await pool.execute(`
-      SELECT t.id, t.title, t.category, t.kind, t.amount, t.scope, t.occurred_at,
-             t.source_account, t.destination_account, t.owner_name, t.payer_name,
+      SELECT t.id, t.title, COALESCE(c.name, t.category) AS category, t.category_id, t.kind, t.amount, t.scope, t.occurred_at,
+             CASE WHEN t.kind = 'income' THEN CASE WHEN da.owner_type = 'user' AND da.owner_user_id <> ? THEN 'บัญชีสมาชิก' ELSE COALESCE(da.name, t.source_account) END
+               ELSE CASE WHEN sa.owner_type = 'user' AND sa.owner_user_id <> ? THEN 'บัญชีสมาชิก' ELSE COALESCE(sa.name, t.source_account) END END AS source_account,
+             CASE WHEN da.owner_type = 'user' AND da.owner_user_id <> ? THEN 'บัญชีสมาชิก' ELSE COALESCE(da.name, t.destination_account) END AS destination_account,
+             t.source_account_id, t.destination_account_id, t.owner_name, t.payer_name,
+             (SELECT r.id FROM receipt_attachments r WHERE r.transaction_id = t.id AND r.deleted_at IS NULL ORDER BY r.id DESC LIMIT 1) AS receipt_id,
              u.display_name AS recorder_name, t.icon
       FROM transactions t
       LEFT JOIN users u ON u.id = t.created_by_user_id
+      LEFT JOIN money_accounts sa ON sa.id = t.source_account_id
+      LEFT JOIN money_accounts da ON da.id = t.destination_account_id
+      LEFT JOIN transaction_categories c ON c.id = t.category_id
       WHERE ((t.scope = 'personal' AND t.created_by_user_id = ?)
          OR (t.scope = 'family' AND t.family_id IN (
            SELECT family_id FROM family_members WHERE user_id = ? AND left_at IS NULL
@@ -544,8 +990,8 @@ async function handle(request, response) {
             AND owner_membership.left_at IS NULL AND owner_membership.role = 'owner'
         )
       )` : 'AND t.deleted_at IS NULL'}
-      ORDER BY t.occurred_at DESC, t.id DESC LIMIT 500
-    `, includeTrash ? [user.id, user.id, selectedFamily, user.id, user.id] : [user.id, user.id, selectedFamily])
+      ORDER BY t.occurred_at DESC, t.id DESC
+    `, includeTrash ? [user.id, user.id, user.id, user.id, user.id, selectedFamily, user.id, user.id] : [user.id, user.id, user.id, user.id, user.id, selectedFamily])
     return send(response, 200, rows.map(mapTransaction))
   }
 
@@ -557,7 +1003,13 @@ async function handle(request, response) {
     const scope = body.scope
     const amount = Number(body.amount)
     const title = String(body.title || '').trim()
-    const category = String(body.category || '').trim()
+    const clientRequestId = body.clientRequestId == null ? null : String(body.clientRequestId)
+    const occurredAtInput = String(body.occurredAt || `${new Date().toISOString().slice(0, 10)}T12:00:00+07:00`)
+    const occurredAt = occurredAtInput.replace('T', ' ').replace(/(?:\+07:00|Z)$/, '').slice(0, 19)
+    const requestedCategoryId = Number(body.categoryId) || null
+    let category = String(body.category || '').trim()
+    const requestedSourceAccountId = Number(body.sourceAccountId) || null
+    const requestedDestinationAccountId = Number(body.destinationAccountId) || null
     const sourceAccount = String(body.sourceAccount || '').trim()
     const destinationAccount = kind === 'transfer' ? String(body.destinationAccount || '').trim() : null
     const owner = String(body.owner || '').trim()
@@ -565,10 +1017,12 @@ async function handle(request, response) {
     const icon = String(body.icon || '🧾').slice(0, 12)
     if (!['income', 'expense', 'transfer'].includes(kind)) return send(response, 400, { error: 'ประเภทรายการไม่ถูกต้อง' })
     if (!['family', 'personal'].includes(scope)) return send(response, 400, { error: 'ขอบเขตรายการไม่ถูกต้อง' })
+    if (clientRequestId && !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(clientRequestId)) return send(response, 400, { error: 'รหัสคำขอบันทึกไม่ถูกต้อง' })
     if (!Number.isFinite(amount) || amount <= 0 || Math.round(amount * 100) !== amount * 100) return send(response, 400, { error: 'จำนวนเงินต้องมากกว่าศูนย์และไม่เกินสองตำแหน่งทศนิยม' })
-    if (!title || title.length > 160 || !category || category.length > 80 || !sourceAccount || sourceAccount.length > 100) return send(response, 400, { error: 'กรอกข้อมูลรายการให้ครบและอยู่ในความยาวที่กำหนด' })
+    if (!validLocalDateTime(occurredAt)) return send(response, 400, { error: 'วันที่รายการไม่ถูกต้อง' })
+    if (!title || title.length > 160 || sourceAccount.length > 100) return send(response, 400, { error: 'กรอกข้อมูลรายการให้ครบและอยู่ในความยาวที่กำหนด' })
     if (owner.length > 100 || (payer && payer.length > 100)) return send(response, 400, { error: 'ชื่อผู้เกี่ยวข้องยาวเกินกำหนด' })
-    if (kind === 'transfer' && (!destinationAccount || destinationAccount.length > 100 || destinationAccount === sourceAccount)) return send(response, 400, { error: 'เลือกบัญชีต้นทางและปลายทางให้ต่างกัน' })
+    if (kind === 'transfer' && (!destinationAccount || destinationAccount.length > 100 || requestedDestinationAccountId === requestedSourceAccountId)) return send(response, 400, { error: 'เลือกบัญชีต้นทางและปลายทางให้ต่างกัน' })
 
     let familyId = null
     let permittedNames = [user.displayName]
@@ -585,6 +1039,29 @@ async function handle(request, response) {
       `, [familyId])
       permittedNames = [...members.map((member) => member.display_name), 'ครอบครัว']
     }
+    let sourceAccountRecord = null
+    let destinationAccountRecord = null
+    let categoryRecord = null
+    const effectiveSourceId = kind === 'income' ? null : requestedSourceAccountId
+    const effectiveDestinationId = kind === 'income' ? requestedSourceAccountId : kind === 'transfer' ? requestedDestinationAccountId : null
+    if (!requestedSourceAccountId) return send(response, 400, { error: 'เลือกบัญชีเงินที่มีอยู่ก่อนบันทึกรายการ' })
+    sourceAccountRecord = await accountById(pool, requestedSourceAccountId)
+    if (!await accountVisibleToUser(user, sourceAccountRecord, scope, familyId, 'source', kind)) return send(response, 403, { error: 'คุณไม่มีสิทธิ์ใช้บัญชีเงินนี้ในรายการดังกล่าว' })
+    if (kind === 'transfer' || kind === 'income') {
+      const receivingId = kind === 'income' ? requestedSourceAccountId : requestedDestinationAccountId
+      destinationAccountRecord = await accountById(pool, receivingId)
+      if (!await accountVisibleToUser(user, destinationAccountRecord, scope, familyId, kind === 'income' ? 'source' : 'destination', kind)) return send(response, 403, { error: 'คุณไม่มีสิทธิ์ใช้บัญชีปลายทางนี้' })
+    }
+    if (kind !== 'transfer') {
+      if (!requestedCategoryId) return send(response, 400, { error: 'เลือกหมวดหมู่จากรายการที่มีอยู่' })
+      const [categories] = await pool.execute('SELECT * FROM transaction_categories WHERE id = ? AND archived_at IS NULL', [requestedCategoryId])
+      categoryRecord = categories[0]
+      if (!categoryRecord || categoryRecord.kind !== kind || categoryRecord.owner_type !== (scope === 'family' ? 'family' : 'user') || Number(categoryRecord.owner_ref) !== (scope === 'family' ? Number(familyId) : user.id)) return send(response, 403, { error: 'หมวดหมู่นี้ไม่อยู่ในขอบเขตที่เลือก' })
+      category = categoryRecord.name
+    } else category = 'โอนเงิน'
+    const resolvedSourceName = kind === 'income' ? destinationAccountRecord.name : sourceAccountRecord.name
+    const resolvedDestinationName = kind === 'transfer' ? destinationAccountRecord?.name : null
+    if (!category || category.length > 80 || !resolvedSourceName || resolvedSourceName.length > 100) return send(response, 400, { error: 'ข้อมูลหมวดหมู่หรือบัญชีเงินไม่ถูกต้อง' })
     if (!permittedNames.includes(owner)) return send(response, 403, { error: 'เจ้าของรายการต้องเป็นสมาชิกที่ยังอยู่ในขอบเขตนี้' })
     if (payer && !permittedNames.includes(payer)) return send(response, 403, { error: 'ผู้จ่ายต้องเป็นสมาชิกที่ยังอยู่ในขอบเขตนี้' })
     const connection = await pool.getConnection()
@@ -593,14 +1070,22 @@ async function handle(request, response) {
       const [result] = await connection.execute(`
         INSERT INTO transactions
           (title, category, kind, amount, scope, occurred_at, source_account,
-           destination_account, owner_name, payer_name, recorder_name, icon, created_by_user_id, family_id)
-        VALUES (?, ?, ?, ?, ?, NOW(), ?, ?, ?, ?, ?, ?, ?, ?)
-      `, [title, category, kind, amount, scope, sourceAccount, destinationAccount, owner, payer || null, user.displayName, icon, user.id, familyId])
+           destination_account, owner_name, payer_name, recorder_name, icon, created_by_user_id, family_id,
+           category_id, source_account_id, destination_account_id, client_request_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `, [title, category, kind, amount, scope, occurredAt, resolvedSourceName, resolvedDestinationName, owner, payer || null, user.displayName, icon, user.id, familyId, categoryRecord?.id || null, effectiveSourceId, effectiveDestinationId, clientRequestId])
       const row = await getTransactionRecord(connection, result.insertId)
       await auditTransaction(connection, result.insertId, user.id, 'created', null, transactionSnapshot(row))
       await connection.commit()
-      return send(response, 201, mapTransaction(row))
-    } catch (error) { await connection.rollback(); throw error } finally { connection.release() }
+      return send(response, 201, await mapTransactionForUser(connection, row, user))
+    } catch (error) {
+      await connection.rollback()
+      if (error.code === 'ER_DUP_ENTRY' && clientRequestId) {
+        const [existing] = await connection.execute('SELECT * FROM transactions WHERE created_by_user_id = ? AND client_request_id = ?', [user.id, clientRequestId])
+        if (existing.length) return send(response, 200, await mapTransactionForUser(connection, existing[0], user))
+      }
+      throw error
+    } finally { connection.release() }
   }
 
   const transactionHistoryRoute = pathname.match(/^\/api\/transactions\/(\d+)\/history$/)
@@ -616,7 +1101,8 @@ async function handle(request, response) {
         FROM transaction_audit_logs a JOIN users u ON u.id = a.actor_user_id
         WHERE a.transaction_id = ? ORDER BY a.created_at DESC, a.id DESC
       `, [row.id])
-      return send(response, 200, history.map((entry) => ({ id: Number(entry.id), action: entry.action, before: entry.before_snapshot, after: entry.after_snapshot, actor: entry.actor_name, createdAt: entry.created_at })))
+      const mappedHistory = await Promise.all(history.map(async (entry) => ({ id: Number(entry.id), action: entry.action, before: await mapAuditSnapshotForUser(connection, entry.before_snapshot, user), after: await mapAuditSnapshotForUser(connection, entry.after_snapshot, user), actor: entry.actor_name, createdAt: entry.created_at })))
+      return send(response, 200, mappedHistory)
     } finally { connection.release() }
   }
 
@@ -649,7 +1135,7 @@ async function handle(request, response) {
         const after = transactionSnapshot(await getTransactionRecord(connection, transactionId))
         await auditTransaction(connection, transactionId, user.id, 'restored', before, after)
         await connection.commit()
-        return send(response, 200, { ok: true, transaction: mapTransaction(await getTransactionRecord(pool, transactionId)) })
+        return send(response, 200, { ok: true, transaction: await mapTransactionForUser(connection, await getTransactionRecord(connection, transactionId), user) })
       }
       if (row.deleted_at) { await connection.rollback(); return send(response, 409, { error: 'กู้คืนรายการก่อนแก้ไข' }) }
       const body = await readJson(request)
@@ -664,27 +1150,53 @@ async function handle(request, response) {
         payer: body.payer === undefined ? row.payer_name : String(body.payer).trim(),
         icon: body.icon === undefined ? row.icon : String(body.icon).slice(0, 12),
         occurredAt: body.occurredAt === undefined ? String(row.occurred_at) : String(body.occurredAt).replace('T', ' ').slice(0, 19),
+        categoryId: body.categoryId === undefined ? (row.category_id == null ? null : Number(row.category_id)) : (Number(body.categoryId) || null),
+        sourceAccountId: body.sourceAccountId === undefined ? (row.source_account_id == null ? null : Number(row.source_account_id)) : (Number(body.sourceAccountId) || null),
+        destinationAccountId: body.destinationAccountId === undefined ? (row.destination_account_id == null ? null : Number(row.destination_account_id)) : (Number(body.destinationAccountId) || null),
       }
       if (!['income', 'expense', 'transfer'].includes(values.kind)) { await connection.rollback(); return send(response, 400, { error: 'ประเภทรายการไม่ถูกต้อง' }) }
       if (!Number.isFinite(values.amount) || values.amount <= 0 || Math.round(values.amount * 100) !== values.amount * 100) { await connection.rollback(); return send(response, 400, { error: 'จำนวนเงินต้องมากกว่าศูนย์และไม่เกินสองตำแหน่งทศนิยม' }) }
       if (!values.title || values.title.length > 160 || !values.category || values.category.length > 80 || !values.sourceAccount || values.sourceAccount.length > 100) { await connection.rollback(); return send(response, 400, { error: 'กรอกข้อมูลรายการให้ครบและอยู่ในความยาวที่กำหนด' }) }
       if (values.owner.length > 100 || values.payer?.length > 100) { await connection.rollback(); return send(response, 400, { error: 'ชื่อผู้เกี่ยวข้องยาวเกินกำหนด' }) }
-      if (values.kind === 'transfer' && (!values.destinationAccount || values.destinationAccount.length > 100 || values.destinationAccount === values.sourceAccount)) { await connection.rollback(); return send(response, 400, { error: 'เลือกบัญชีต้นทางและปลายทางให้ต่างกัน' }) }
-      if (!/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(values.occurredAt) || Number.isNaN(new Date(`${values.occurredAt.replace(' ', 'T')}+07:00`).getTime())) { await connection.rollback(); return send(response, 400, { error: 'วันที่รายการไม่ถูกต้อง' }) }
+      if (values.kind === 'transfer' && (!values.destinationAccount || values.destinationAccount.length > 100 || values.destinationAccountId === values.sourceAccountId)) { await connection.rollback(); return send(response, 400, { error: 'เลือกบัญชีต้นทางและปลายทางให้ต่างกัน' }) }
+      if (!validLocalDateTime(values.occurredAt)) { await connection.rollback(); return send(response, 400, { error: 'วันที่รายการไม่ถูกต้อง' }) }
       const permittedNames = row.scope === 'personal' ? [user.displayName] : [
         ...(await connection.execute(`SELECT u.display_name FROM family_members fm JOIN users u ON u.id = fm.user_id WHERE fm.family_id = ? AND fm.left_at IS NULL`, [row.family_id]))[0].map((member) => member.display_name), row.owner_name, row.payer_name, 'ครอบครัว',
       ]
       if (!permittedNames.includes(values.owner) || values.payer && !permittedNames.includes(values.payer)) { await connection.rollback(); return send(response, 403, { error: 'เจ้าของรายการและผู้จ่ายต้องอยู่ในขอบเขตนี้' }) }
+      let categoryName = values.category
+      if (values.kind !== 'transfer' && values.categoryId) {
+        const [categories] = await connection.execute('SELECT * FROM transaction_categories WHERE id = ? AND archived_at IS NULL', [values.categoryId])
+        const category = categories[0]
+        if (!category || category.kind !== values.kind || category.owner_type !== (row.scope === 'family' ? 'family' : 'user') || Number(category.owner_ref) !== (row.scope === 'family' ? Number(row.family_id) : user.id)) { await connection.rollback(); return send(response, 403, { error: 'หมวดหมู่นี้ไม่อยู่ในขอบเขตที่เลือก' }) }
+        categoryName = category.name
+      } else if (values.kind !== 'transfer' && values.categoryId === null && row.category_id !== null) { await connection.rollback(); return send(response, 400, { error: 'เลือกหมวดหมู่จากรายการที่มีอยู่' }) }
+      let sourceRecord = null; let destinationRecord = null
+      const accountSourceId = values.kind === 'income' ? values.destinationAccountId : values.sourceAccountId
+      const accountDestinationId = values.kind === 'transfer' ? values.destinationAccountId : null
+      if (accountSourceId) {
+        sourceRecord = await accountById(connection, accountSourceId)
+        if (!await accountVisibleToUser(user, sourceRecord, row.scope, row.family_id, 'source', values.kind)) { await connection.rollback(); return send(response, 403, { error: 'คุณไม่มีสิทธิ์ใช้บัญชีเงินนี้ในรายการดังกล่าว' }) }
+      }
+      if (accountDestinationId) {
+        destinationRecord = await accountById(connection, accountDestinationId)
+        if (!await accountVisibleToUser(user, destinationRecord, row.scope, row.family_id, 'destination', values.kind)) { await connection.rollback(); return send(response, 403, { error: 'คุณไม่มีสิทธิ์ใช้บัญชีปลายทางนี้' }) }
+      }
+      if (values.kind !== 'transfer' && values.kind !== 'income' && values.sourceAccountId && !sourceRecord) { await connection.rollback(); return send(response, 400, { error: 'ไม่พบบัญชีเงินต้นทาง' }) }
+      if (values.kind === 'income' && values.destinationAccountId && !sourceRecord) { await connection.rollback(); return send(response, 400, { error: 'ไม่พบบัญชีเงินรับเข้า' }) }
+      if (values.kind === 'transfer' && (!sourceRecord || !destinationRecord)) { await connection.rollback(); return send(response, 400, { error: 'เลือกบัญชีต้นทางและปลายทางที่ใช้งานได้' }) }
+      if (sourceRecord) values.sourceAccount = sourceRecord.name
+      if (destinationRecord) values.destinationAccount = destinationRecord.name
       const before = transactionSnapshot(row)
       await connection.execute(`
-        UPDATE transactions SET title = ?, category = ?, kind = ?, amount = ?, occurred_at = ?,
-          source_account = ?, destination_account = ?, owner_name = ?, payer_name = ?, icon = ?, updated_by_user_id = ?
+        UPDATE transactions SET title = ?, category = ?, category_id = ?, kind = ?, amount = ?, occurred_at = ?,
+          source_account = ?, destination_account = ?, source_account_id = ?, destination_account_id = ?, owner_name = ?, payer_name = ?, icon = ?, updated_by_user_id = ?
         WHERE id = ?
-      `, [values.title, values.category, values.kind, values.amount, values.occurredAt, values.sourceAccount, values.kind === 'transfer' ? values.destinationAccount : null, values.owner, values.kind === 'expense' ? values.payer || null : null, values.icon, user.id, transactionId])
+      `, [values.title, values.kind === 'transfer' ? 'โอนเงิน' : categoryName, values.kind === 'transfer' ? null : values.categoryId, values.kind, values.amount, values.occurredAt, values.sourceAccount, values.kind === 'transfer' ? values.destinationAccount : null, values.kind === 'income' ? null : accountSourceId, values.kind === 'income' ? accountSourceId : accountDestinationId, values.owner, values.kind === 'expense' ? values.payer || null : null, values.icon, user.id, transactionId])
       const updated = await getTransactionRecord(connection, transactionId)
       await auditTransaction(connection, transactionId, user.id, 'updated', before, transactionSnapshot(updated))
       await connection.commit()
-      return send(response, 200, mapTransaction(updated))
+      return send(response, 200, await mapTransactionForUser(connection, updated, user))
     } catch (error) { await connection.rollback(); throw error } finally { connection.release() }
   }
 

@@ -15,16 +15,20 @@ type AuthUser = { id: number; email: string; displayName: string; systemRole: 'u
 type FamilyInfo = AuthUser['families'][number] & { members: { id: number; displayName: string; email: string; role: 'owner' | 'member'; joinedAt: string }[]; invitations: { id: number; expiresAt: string }[] }
 type Transaction = {
   id: number; title: string; category: string; kind: Kind; amount: number
-  date: string; account: string; owner: string; payer?: string; recorder: string; icon: string; scope: Scope
+  date: string; occurredAt: string; account: string; owner: string; payer?: string; recorder: string; icon: string; scope: Scope
+  categoryId: number | null; sourceAccountId: number | null; destinationAccountId: number | null
+  receiptId?: number | null
 }
 type AuditHistory = { id: number; action: 'created' | 'updated' | 'trashed' | 'restored'; before: { title?: string; category?: string; amount?: string } | null; after: { title?: string; category?: string; amount?: string } | null; actor: string; createdAt: string }
+type MoneyAccount = { id: number; ownerType: 'user' | 'family'; ownerUserId: number | null; familyId: number | null; name: string; accountType: 'cash' | 'bank' | 'other'; openingBalance: number; openingDate: string; balance: number }
+type Category = { id: number; ownerType: 'user' | 'family'; ownerRef: number; kind: 'income' | 'expense'; name: string; icon: string; isDefault: boolean }
+type TransferRecipientAccount = { id: number; ownerName: string; accountType: 'cash' | 'bank' | 'other' }
+type Budget = { id: number; categoryId: number; category: string; icon: string; amount: number; spent: number; periodType: 'monthly' | 'custom'; cycleStartDay: number; periodStart: string | null; periodEnd: string | null; alertPercent: number }
+type ReceiptSuggestion = { merchant: string | null; amount: number | null; date: string | null; category: string | null; rawText: string }
 
-const categories = {
-  expense: ['อาหาร', 'เดินทาง', 'ของใช้ในบ้าน', 'บ้าน', 'การศึกษา', 'สุขภาพ', 'ช้อปปิ้ง', 'อื่น ๆ'],
-  income: ['เงินเดือน', 'โบนัส', 'รายได้เสริม', 'ดอกเบี้ย', 'เงินคืน', 'อื่น ๆ'],
-}
-
-const formatMoney = (value: number) => new Intl.NumberFormat('th-TH', { maximumFractionDigits: 0 }).format(value)
+const formatMoney = (value: number) => new Intl.NumberFormat('th-TH', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(value)
+const bangkokToday = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Bangkok', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date())
+const monthStart = (date: string) => `${date.slice(0, 7)}-01`
 
 function App() {
   const [transactions, setTransactions] = useState<Transaction[]>([])
@@ -34,29 +38,49 @@ function App() {
   const [resetToken, setResetToken] = useState('')
   const [inviteToken, setInviteToken] = useState('')
   const [familyInfo, setFamilyInfo] = useState<FamilyInfo[]>([])
+  const [moneyAccounts, setMoneyAccounts] = useState<MoneyAccount[]>([])
+  const [categoryItems, setCategoryItems] = useState<Category[]>([])
+  const [transferRecipientAccounts, setTransferRecipientAccounts] = useState<TransferRecipientAccount[]>([])
+  const [budgets, setBudgets] = useState<Budget[]>([])
+  const [financeVersion, setFinanceVersion] = useState(0)
   const [activeFamilyId, setActiveFamilyId] = useState<number | null>(null)
   const [inviteLink, setInviteLink] = useState('')
   const [apiStatus, setApiStatus] = useState<'connecting' | 'connected' | 'offline'>('connecting')
   const [scope, setScope] = useState<Scope>('family')
   const [page, setPage] = useState('ภาพรวม')
   const [range, setRange] = useState('เดือนนี้')
+  const [dateFrom, setDateFrom] = useState(monthStart(bangkokToday()))
+  const [dateTo, setDateTo] = useState(bangkokToday())
   const [search, setSearch] = useState('')
   const [kindFilter, setKindFilter] = useState('ทั้งหมด')
   const [modal, setModal] = useState(false)
   const [editingTransactionId, setEditingTransactionId] = useState<number | null>(null)
+  const [clientRequestId, setClientRequestId] = useState(() => crypto.randomUUID())
   const [historyEntries, setHistoryEntries] = useState<AuditHistory[] | null>(null)
   const [toast, setToast] = useState('')
   const [filePreview, setFilePreview] = useState('')
+  const [selectedReceipt, setSelectedReceipt] = useState<File | null>(null)
+  const [receiptId, setReceiptId] = useState<number | null>(null)
+  const [receiptSuggestion, setReceiptSuggestion] = useState<ReceiptSuggestion | null>(null)
+  const [receiptOcrAvailable, setReceiptOcrAvailable] = useState(true)
   const [formKind, setFormKind] = useState<Kind>('expense')
   const [formScope, setFormScope] = useState<Scope>('family')
   const [formAmount, setFormAmount] = useState('')
   const [formTitle, setFormTitle] = useState('')
+  const [formDate, setFormDate] = useState(bangkokToday())
   const [formCategory, setFormCategory] = useState('อาหาร')
+  const [formCategoryId, setFormCategoryId] = useState('')
   const [formAccount, setFormAccount] = useState('เงินสด')
-  const [formDestination, setFormDestination] = useState('KBank •• 4821')
-  const [formOwner, setFormOwner] = useState('คุณ')
-  const [formPayer, setFormPayer] = useState('คุณ')
-  const [monthIndex, setMonthIndex] = useState(0)
+  const [formAccountId, setFormAccountId] = useState('')
+  const [formDestination, setFormDestination] = useState('')
+  const [formDestinationId, setFormDestinationId] = useState('')
+  const [accountDialog, setAccountDialog] = useState(false)
+  const [accountName, setAccountName] = useState('')
+  const [accountType, setAccountType] = useState<'cash' | 'bank' | 'other'>('bank')
+  const [accountOpeningBalance, setAccountOpeningBalance] = useState('0')
+  const [accountOpeningDate, setAccountOpeningDate] = useState(new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Bangkok', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date()))
+  const [formOwner, setFormOwner] = useState('')
+  const [formPayer, setFormPayer] = useState('')
   const fileInput = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
@@ -111,6 +135,65 @@ function App() {
   }, [authUser])
 
   useEffect(() => {
+    if (!authUser) { setMoneyAccounts([]); setCategoryItems([]); return }
+    let active = true
+    const scopes = [
+      { scope: 'personal', familyId: null },
+      ...(activeFamilyId ? [{ scope: 'family', familyId: activeFamilyId }] : []),
+    ]
+    Promise.all(scopes.map(async ({ scope: selectedScope, familyId }) => {
+      const query = new URLSearchParams({ scope: selectedScope })
+      if (familyId) query.set('familyId', String(familyId))
+      const [accountsResponse, categoriesResponse] = await Promise.all([fetch(`/api/accounts?${query}`), fetch(`/api/categories?${query}`)])
+      if (!accountsResponse.ok || !categoriesResponse.ok) throw new Error('โหลดบัญชีเงินหรือหมวดหมู่ไม่สำเร็จ')
+      return { accounts: await accountsResponse.json() as MoneyAccount[], categories: await categoriesResponse.json() as Category[] }
+    })).then((results) => { if (active) { setMoneyAccounts(results.flatMap((result) => result.accounts)); setCategoryItems(results.flatMap((result) => result.categories)) } }).catch(() => { if (active) notify('โหลดบัญชีเงินหรือหมวดหมู่ไม่สำเร็จ') })
+    return () => { active = false }
+  }, [authUser, activeFamilyId, financeVersion])
+
+  useEffect(() => {
+    if (!authUser) { setBudgets([]); return }
+    const query = new URLSearchParams({ scope })
+    if (scope === 'family' && activeFamilyId) query.set('familyId', String(activeFamilyId))
+    fetch(`/api/budgets?${query}`).then(async (response) => {
+      if (!response.ok) throw new Error('โหลดงบประมาณไม่สำเร็จ')
+      return response.json() as Promise<Budget[]>
+    }).then(setBudgets).catch(() => setBudgets([]))
+  }, [authUser, scope, activeFamilyId, financeVersion])
+
+  useEffect(() => {
+    if (!authUser || !activeFamilyId) { setTransferRecipientAccounts([]); return }
+    let active = true
+    fetch(`/api/families/${activeFamilyId}/transfer-recipients`).then(async (response) => {
+      if (!response.ok) throw new Error('โหลดบัญชีผู้รับโอนไม่สำเร็จ')
+      return response.json() as Promise<TransferRecipientAccount[]>
+    }).then((accounts) => { if (active) setTransferRecipientAccounts(accounts) }).catch(() => { if (active) setTransferRecipientAccounts([]) })
+    return () => { active = false }
+  }, [authUser, activeFamilyId, financeVersion])
+
+  const formAccounts = useMemo(() => moneyAccounts.filter((account) => formScope === 'family' ? account.ownerType === 'family' && account.familyId === activeFamilyId || account.ownerType === 'user' && account.ownerUserId === authUser?.id : account.ownerType === 'user' && account.ownerUserId === authUser?.id), [moneyAccounts, formScope, activeFamilyId, authUser])
+  const formCategories = useMemo(() => categoryItems.filter((category) => category.kind === formKind && category.ownerType === (formScope === 'family' ? 'family' : 'user') && category.ownerRef === (formScope === 'family' ? activeFamilyId : authUser?.id)), [categoryItems, formKind, formScope, activeFamilyId, authUser])
+
+  useEffect(() => {
+    if (!formAccounts.some((account) => String(account.id) === formAccountId)) {
+      const first = formAccounts[0]
+      setFormAccountId(first ? String(first.id) : '')
+      setFormAccount(first?.name || '')
+    }
+    const destinations = formScope === 'family' ? [...formAccounts, ...transferRecipientAccounts.map((account) => ({ ...account, ownerType: 'user' as const, ownerUserId: null, familyId: null, name: `${account.ownerName} · ${account.accountType === 'cash' ? 'เงินสด' : account.accountType === 'bank' ? 'บัญชีธนาคาร' : 'บัญชีอื่น'}`, balance: 0, openingBalance: 0, openingDate: '' }))] : formAccounts
+    if (formKind === 'transfer' && !destinations.some((account) => String(account.id) === formDestinationId)) {
+      const other = destinations.find((account) => String(account.id) !== formAccountId)
+      setFormDestinationId(other ? String(other.id) : '')
+      setFormDestination(other?.name || '')
+    }
+    if (formKind !== 'transfer' && !formCategories.some((category) => String(category.id) === formCategoryId)) {
+      const first = formCategories[0]
+      setFormCategoryId(first ? String(first.id) : '')
+      setFormCategory(first?.name || '')
+    }
+  }, [formAccounts, formCategories, transferRecipientAccounts, formScope, formKind, formAccountId, formDestinationId, formCategoryId])
+
+  useEffect(() => {
     if (activeFamilyId && authUser?.families.some((family) => family.id === activeFamilyId)) return
     setActiveFamilyId(authUser?.families[0]?.id ?? null)
   }, [authUser, activeFamilyId])
@@ -132,31 +215,56 @@ function App() {
     return () => { active = false }
   }, [authUser, scope, activeFamilyId, page])
 
-  const filtered = useMemo(() => transactions.filter((item) => {
+  const rangeRows = useMemo(() => transactions.filter((item) => {
+    const date = item.occurredAt.slice(0, 10)
+    return date >= dateFrom && date <= dateTo
+  }), [transactions, dateFrom, dateTo])
+
+  const filtered = useMemo(() => rangeRows.filter((item) => {
     const scopeMatches = item.scope === scope
     const typeMatches = kindFilter === 'ทั้งหมด' || (kindFilter === 'รายจ่าย' && item.kind === 'expense') || (kindFilter === 'รายรับ' && item.kind === 'income') || (kindFilter === 'โอน' && item.kind === 'transfer')
     return scopeMatches && typeMatches && item.title.toLowerCase().includes(search.toLowerCase())
-  }), [transactions, scope, kindFilter, search])
+  }), [rangeRows, scope, kindFilter, search])
 
   const totals = useMemo(() => {
-    const visible = transactions.filter((item) => item.scope === scope)
+    const visible = rangeRows.filter((item) => item.scope === scope)
     const income = visible.filter((item) => item.kind === 'income').reduce((sum, item) => sum + item.amount, 0)
     const expense = visible.filter((item) => item.kind === 'expense').reduce((sum, item) => sum + item.amount, 0)
     return { income, expense, net: income - expense }
-  }, [transactions, scope])
+  }, [rangeRows, scope])
+
+  const categoryTotals = useMemo(() => {
+    const totals = new Map<string, number>()
+    for (const item of rangeRows) if (item.scope === scope && item.kind === 'expense') totals.set(item.category, (totals.get(item.category) || 0) + item.amount)
+    return [...totals].sort((a, b) => b[1] - a[1]).slice(0, 5)
+  }, [rangeRows, scope])
+  const budgetAlerts = budgets.filter((budget) => budget.spent >= budget.amount * budget.alertPercent / 100)
+
+  function exportReport() {
+    const escape = (value: string) => `"${value.replaceAll('"', '""')}"`
+    const lines = [['วันที่', 'รายการ', 'ประเภท', 'หมวดหมู่', 'ขอบเขต', 'บัญชี', 'ผู้จ่าย', 'เจ้าของรายการ', 'จำนวนเงิน'], ...filtered.map((item) => [item.occurredAt.slice(0, 10), item.title, item.kind === 'income' ? 'รายรับ' : item.kind === 'expense' ? 'รายจ่าย' : 'โอน', item.category, item.scope === 'family' ? 'ครอบครัว' : 'ส่วนตัว', item.account, item.payer || '', item.owner, String(item.amount)])]
+    const csv = `\uFEFF${lines.map((line) => line.map(escape).join(',')).join('\r\n')}`
+    const blobUrl = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }))
+    const link = document.createElement('a'); link.href = blobUrl; link.download = `ounjai-${dateFrom}-${dateTo}.csv`; link.click(); window.setTimeout(() => URL.revokeObjectURL(blobUrl), 1000)
+  }
 
   function openComposer(kind: Kind = 'expense') {
     setEditingTransactionId(null)
-    setFormKind(kind); setFormScope(scope); setFormCategory(kind === 'income' ? 'เงินเดือน' : 'อาหาร')
-    setFormAmount(''); setFormTitle(''); setFilePreview(''); setFormOwner(authUser?.displayName || ''); setFormPayer(authUser?.displayName || ''); setModal(true)
+    setClientRequestId(crypto.randomUUID())
+    setFormKind(kind); setFormScope(scope === 'family' && authUser?.families.length ? 'family' : 'personal'); setFormCategory(kind === 'income' ? 'เงินเดือน' : 'อาหาร')
+    setFormAmount(''); setFormTitle(''); setFormDate(bangkokToday()); setFilePreview(''); setSelectedReceipt(null); setReceiptId(null); setReceiptSuggestion(null); setFormOwner(authUser?.displayName || ''); setFormPayer(authUser?.displayName || ''); setModal(true)
   }
 
   function editTransaction(item: Transaction) {
     setEditingTransactionId(item.id)
     setFormKind(item.kind); setFormScope(item.scope); setFormCategory(item.category)
     setFormAmount(String(item.amount)); setFormTitle(item.title)
+    setFormDate(item.occurredAt.slice(0, 10))
+    setFormCategoryId(item.categoryId ? String(item.categoryId) : '')
     const [account, destination] = item.account.split(' → ')
     setFormAccount(account); if (destination) setFormDestination(destination)
+    setFormAccountId(String(item.kind === 'income' ? item.destinationAccountId || '' : item.sourceAccountId || ''))
+    setFormDestinationId(String(item.destinationAccountId || ''))
     setFormOwner(item.owner); setFormPayer(item.payer || item.recorder); setFilePreview(''); setModal(true)
   }
 
@@ -167,12 +275,38 @@ function App() {
   function handleImage(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0]
     if (!file) return
-    const preview = URL.createObjectURL(file)
-    setFilePreview(preview)
-    setFormTitle('ร้านกาแฟ · อ่านข้อมูลตัวอย่าง')
-    setFormAmount('185')
-    setFormCategory('อาหาร')
-    notify('เพิ่มภาพแล้ว · ตัวอย่างนี้ยังไม่ได้เชื่อมระบบอ่านสลิปจริง')
+    if (file.size > 6 * 1024 * 1024) { notify('เลือกภาพขนาดไม่เกิน 6 MB'); event.target.value = ''; return }
+    if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type)) { notify('รองรับภาพ JPEG, PNG หรือ WebP'); event.target.value = ''; return }
+    if (receiptId) void fetch(`/api/receipts/${receiptId}`, { method: 'DELETE', headers: { 'content-type': 'application/json' }, body: '{}' })
+    setReceiptId(null)
+    if (filePreview) URL.revokeObjectURL(filePreview)
+    setFilePreview(URL.createObjectURL(file)); setSelectedReceipt(file); setReceiptSuggestion(null)
+    const reader = new FileReader()
+    reader.onload = async () => {
+      try {
+        const response = await fetch('/api/receipts', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ fileName: file.name, mimeType: file.type, data: reader.result, scope: formScope, familyId: formScope === 'family' ? activeFamilyId : undefined }) })
+        const result = await response.json() as { id?: number; extracted?: ReceiptSuggestion; ocrAvailable?: boolean; error?: string }
+        if (!response.ok || !result.id) throw new Error(result.error || 'อัปโหลดและอ่านภาพไม่สำเร็จ')
+        setReceiptId(result.id); setReceiptSuggestion(result.extracted || null); setReceiptOcrAvailable(Boolean(result.ocrAvailable))
+        if (result.extracted?.merchant && !formTitle) setFormTitle(result.extracted.merchant)
+        if (result.extracted?.amount && !formAmount) setFormAmount(String(result.extracted.amount))
+        if (result.extracted?.date) setFormDate(result.extracted.date)
+        if (result.extracted?.category) {
+          const category = formCategories.find((item) => item.name === result.extracted?.category)
+          if (category) { setFormCategory(category.name); setFormCategoryId(String(category.id)) }
+        }
+        if (!result.ocrAvailable) notify('บันทึกภาพแล้ว แต่บริการ OCR ยังไม่พร้อม กรุณากรอกข้อมูลตรวจสอบเอง')
+        else if (!result.extracted?.rawText) notify('สแกนภาพแล้วแต่ยังอ่านข้อมูลไม่ได้ กรุณากรอกข้อมูลเอง')
+      } catch (error) { notify(error instanceof Error ? error.message : 'อัปโหลดภาพไม่สำเร็จ'); setSelectedReceipt(null); setFilePreview('') }
+    }
+    reader.onerror = () => notify('อ่านไฟล์ภาพไม่สำเร็จ')
+    reader.readAsDataURL(file)
+  }
+
+  async function closeComposer(preserveReceipt = false) {
+    if (receiptId && !preserveReceipt) await fetch(`/api/receipts/${receiptId}`, { method: 'DELETE', headers: { 'content-type': 'application/json' }, body: '{}' }).catch(() => {})
+    if (filePreview) URL.revokeObjectURL(filePreview)
+    setModal(false); setSelectedReceipt(null); setReceiptId(null); setReceiptSuggestion(null); setFilePreview('')
   }
 
   async function saveTransaction(event: FormEvent<HTMLFormElement>) {
@@ -180,10 +314,18 @@ function App() {
     const amount = Number(formAmount.replaceAll(',', ''))
     if (!amount || amount <= 0) return
     const title = formTitle.trim() || (formKind === 'income' ? 'รายรับใหม่' : formKind === 'transfer' ? 'รายการโอน' : 'รายจ่ายใหม่')
+    const sourceAccountRecord = formAccounts.find((account) => String(account.id) === formAccountId)
+    const destinationAccountRecord = formAccounts.find((account) => String(account.id) === formDestinationId)
     const body = {
       title, category: formKind === 'transfer' ? 'โอนเงิน' : formCategory,
-      kind: formKind, amount, scope: formScope, sourceAccount: formAccount,
-      destinationAccount: formDestination, owner: formOwner,
+      clientRequestId,
+      categoryId: formKind === 'transfer' ? undefined : Number(formCategoryId),
+      kind: formKind, amount, scope: formScope, sourceAccount: sourceAccountRecord?.name || formAccount,
+      occurredAt: `${formDate}T12:00:00+07:00`,
+      sourceAccountId: Number(formAccountId) || undefined,
+      destinationAccount: destinationAccountRecord?.name || formDestination,
+      destinationAccountId: formKind === 'income' ? Number(formAccountId) || undefined : formKind === 'transfer' ? Number(formDestinationId) || undefined : undefined,
+      owner: formOwner,
       payer: formKind === 'expense' ? formPayer : undefined, recorder: authUser?.displayName,
       familyId: formScope === 'family' ? activeFamilyId : undefined,
       icon: formKind === 'income' ? '💰' : formKind === 'transfer' ? '↗' : '🧾',
@@ -194,8 +336,14 @@ function App() {
       })
       const saved = await response.json() as Transaction | { error?: string }
       if (!response.ok || !('id' in saved)) throw new Error('error' in saved ? saved.error : 'บันทึกรายการไม่สำเร็จ')
+      let receiptAttached = false
+      if (receiptId) {
+        const attached = await fetch(`/api/receipts/${receiptId}/attach`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ transactionId: saved.id }) })
+        receiptAttached = attached.ok
+        if (!receiptAttached) notify('บันทึกรายการแล้ว แต่แนบภาพไม่สำเร็จ')
+      }
       setTransactions((items) => editingTransactionId ? items.map((item) => item.id === saved.id ? saved : item) : [saved, ...items])
-      setApiStatus('connected'); setModal(false); setEditingTransactionId(null); notify(editingTransactionId ? 'แก้ไขรายการแล้ว' : 'บันทึกลง MySQL แล้ว')
+      setApiStatus('connected'); await closeComposer(receiptAttached); setEditingTransactionId(null); setClientRequestId(crypto.randomUUID()); notify(editingTransactionId ? 'แก้ไขรายการแล้ว' : 'บันทึกลง MySQL แล้ว')
     } catch (error) {
       setApiStatus('offline')
       notify(error instanceof Error ? error.message : 'เชื่อมต่อฐานข้อมูลไม่สำเร็จ')
@@ -217,6 +365,120 @@ function App() {
     setTransactions((items) => items.filter((current) => current.id !== item.id)); notify('กู้คืนรายการแล้ว')
   }
 
+  async function deleteReceipt(item: Transaction) {
+    if (!item.receiptId || !window.confirm('ลบภาพสลิปที่แนบกับรายการนี้หรือไม่?')) return
+    const response = await fetch(`/api/receipts/${item.receiptId}`, { method: 'DELETE', headers: { 'content-type': 'application/json' }, body: '{}' })
+    const result = await response.json() as { error?: string }
+    if (!response.ok) return notify(result.error || 'ลบภาพสลิปไม่สำเร็จ')
+    setTransactions((items) => items.map((current) => current.id === item.id ? { ...current, receiptId: null } : current)); notify('ลบภาพสลิปแล้ว')
+  }
+
+  async function saveMoneyAccount(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    const response = await fetch('/api/accounts', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ scope, familyId: scope === 'family' ? activeFamilyId : undefined, name: accountName.trim(), accountType, openingBalance: Number(accountOpeningBalance), openingDate: accountOpeningDate }) })
+    const result = await response.json() as { error?: string }
+    if (!response.ok) return notify(result.error || 'สร้างบัญชีเงินไม่สำเร็จ')
+    setFinanceVersion((value) => value + 1); setAccountDialog(false); setAccountName(''); setAccountOpeningBalance('0'); notify('เพิ่มบัญชีเงินแล้ว')
+  }
+
+  async function editMoneyAccount(account: MoneyAccount) {
+    const name = window.prompt('ชื่อบัญชีเงิน', account.name)
+    if (!name) return
+    const balanceText = window.prompt('ยอดตั้งต้น (บาท)', String(account.openingBalance))
+    if (balanceText === null) return
+    const response = await fetch(`/api/accounts/${account.id}`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name, openingBalance: Number(balanceText), openingDate: account.openingDate, accountType: account.accountType }) })
+    const result = await response.json() as { error?: string }
+    if (!response.ok) return notify(result.error || 'แก้ไขบัญชีเงินไม่สำเร็จ')
+    setFinanceVersion((value) => value + 1); notify('แก้ไขบัญชีเงินแล้ว')
+  }
+
+  async function archiveMoneyAccount(account: MoneyAccount) {
+    if (!window.confirm(`ปิดบัญชี “${account.name}” หรือไม่? ประวัติเดิมจะยังอยู่`)) return
+    const response = await fetch(`/api/accounts/${account.id}`, { method: 'DELETE', headers: { 'content-type': 'application/json' }, body: '{}' })
+    const result = await response.json() as { error?: string }
+    if (!response.ok) return notify(result.error || 'ปิดบัญชีเงินไม่สำเร็จ')
+    setFinanceVersion((value) => value + 1); notify('ปิดบัญชีเงินแล้ว')
+  }
+
+  async function createCategory(kind: 'income' | 'expense', name: string) {
+    const response = await fetch('/api/categories', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ scope, familyId: scope === 'family' ? activeFamilyId : undefined, kind, name }) })
+    const result = await response.json() as { error?: string }
+    if (!response.ok) return notify(result.error || 'เพิ่มหมวดหมู่ไม่สำเร็จ')
+    setFinanceVersion((value) => value + 1); notify('เพิ่มหมวดหมู่แล้ว')
+  }
+
+  async function editCategory(category: Category) {
+    const name = window.prompt('ชื่อหมวดหมู่', category.name)
+    if (!name) return
+    const response = await fetch(`/api/categories/${category.id}`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name }) })
+    const result = await response.json() as { error?: string }
+    if (!response.ok) return notify(result.error || 'แก้ไขหมวดหมู่ไม่สำเร็จ')
+    setFinanceVersion((value) => value + 1); notify('แก้ไขหมวดหมู่แล้ว')
+  }
+
+  async function archiveCategory(category: Category) {
+    if (!window.confirm(`ซ่อนหมวดหมู่ “${category.name}” จากรายการใหม่หรือไม่?`)) return
+    const response = await fetch(`/api/categories/${category.id}`, { method: 'DELETE', headers: { 'content-type': 'application/json' }, body: '{}' })
+    const result = await response.json() as { error?: string }
+    if (!response.ok) return notify(result.error || 'ซ่อนหมวดหมู่ไม่สำเร็จ')
+    setFinanceVersion((value) => value + 1); notify('ซ่อนหมวดหมู่แล้ว')
+  }
+
+  async function createBudget() {
+    const expenses = categoryItems.filter((category) => category.kind === 'expense' && category.ownerType === (scope === 'family' ? 'family' : 'user') && category.ownerRef === (scope === 'family' ? activeFamilyId : authUser?.id))
+    const requestedName = window.prompt(`หมวดรายจ่ายที่จะตั้งงบ:\n${expenses.map((category) => category.name).join(', ')}`)
+    if (!requestedName) return
+    const category = expenses.find((item) => item.name.toLowerCase() === requestedName.trim().toLowerCase())
+    if (!category) return notify('กรุณาพิมพ์ชื่อหมวดที่มีอยู่ให้ตรงกัน')
+    const amountText = window.prompt(`วงเงินงบของ “${category.name}” (บาท)`)
+    if (amountText === null) return
+    const periodAnswer = window.prompt('กำหนดรอบงบ: monthly = รายเดือน, custom = ช่วงวันที่กำหนด', 'monthly')
+    if (!periodAnswer) return
+    const periodType = periodAnswer.trim().toLowerCase() === 'custom' ? 'custom' : 'monthly'
+    const periodStart = periodType === 'custom' ? window.prompt('วันเริ่มรอบ (YYYY-MM-DD)') : null
+    const periodEnd = periodType === 'custom' ? window.prompt('วันสิ้นสุดรอบ (YYYY-MM-DD)') : null
+    if (periodType === 'custom' && (!periodStart || !periodEnd)) return
+    const cycleStartDay = periodType === 'monthly' ? Number(window.prompt('วันที่เริ่มรอบรายเดือน (1–28)', '1')) : undefined
+    const alertPercent = Number(window.prompt('แจ้งเตือนเมื่อใช้ถึงกี่เปอร์เซ็นต์', '80'))
+    const response = await fetch('/api/budgets', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ scope, familyId: scope === 'family' ? activeFamilyId : undefined, categoryId: category.id, amount: Number(amountText), periodType, periodStart, periodEnd, cycleStartDay, alertPercent }) })
+    const result = await response.json() as { error?: string }
+    if (!response.ok) return notify(result.error || 'สร้างงบไม่สำเร็จ')
+    setFinanceVersion((value) => value + 1); notify('สร้างงบประมาณแล้ว')
+  }
+
+  async function manageBudget(budget: Budget) {
+    const choice = window.prompt(`จัดการงบ “${budget.category}”\nพิมพ์ วงเงิน เพื่อแก้ไข หรือ ปิด เพื่อเก็บงบ`)
+    if (choice === 'ปิด') {
+      const response = await fetch(`/api/budgets/${budget.id}`, { method: 'DELETE', headers: { 'content-type': 'application/json' }, body: '{}' })
+      if (!response.ok) return notify('ปิดงบไม่สำเร็จ')
+      setFinanceVersion((value) => value + 1); return notify('ปิดงบแล้ว')
+    }
+    if (choice?.trim() === 'วงเงิน') {
+      const amount = window.prompt('วงเงินใหม่ (บาท)', String(budget.amount))
+      if (amount === null) return
+      const response = await fetch(`/api/budgets/${budget.id}`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ amount: Number(amount), alertPercent: budget.alertPercent, cycleStartDay: budget.cycleStartDay }) })
+      const result = await response.json() as { error?: string }
+      if (!response.ok) return notify(result.error || 'แก้ไขงบไม่สำเร็จ')
+      setFinanceVersion((value) => value + 1); return notify('แก้ไขวงเงินแล้ว')
+    }
+  }
+
+  async function moveBudget() {
+    if (budgets.length < 2) return notify('ต้องมีงบอย่างน้อยสองหมวดก่อนย้ายวงเงิน')
+    const sourceName = window.prompt(`งบต้นทาง:\n${budgets.map((budget) => budget.category).join(', ')}`)
+    const source = budgets.find((budget) => budget.category.toLowerCase() === sourceName?.trim().toLowerCase())
+    if (!source) return
+    const targetName = window.prompt(`งบปลายทาง:\n${budgets.filter((budget) => budget.id !== source.id).map((budget) => budget.category).join(', ')}`)
+    const target = budgets.find((budget) => budget.category.toLowerCase() === targetName?.trim().toLowerCase() && budget.id !== source.id)
+    if (!target) return
+    const amount = window.prompt(`ยอดคงเหลือที่ย้ายได้สูงสุด ฿${formatMoney(Math.max(0, source.amount - source.spent))}`)
+    if (amount === null) return
+    const response = await fetch('/api/budgets/movements', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ fromBudgetId: source.id, toBudgetId: target.id, amount: Number(amount) }) })
+    const result = await response.json() as { error?: string }
+    if (!response.ok) return notify(result.error || 'ย้ายงบไม่สำเร็จ')
+    setFinanceVersion((value) => value + 1); notify('ย้ายวงเงินระหว่างหมวดแล้ว')
+  }
+
   async function viewHistory(item: Transaction) {
     const response = await fetch(`/api/transactions/${item.id}/history`)
     const result = await response.json() as AuditHistory[] | { error?: string }
@@ -225,11 +487,24 @@ function App() {
   }
 
   const navItems = [
-    { label: 'ภาพรวม', icon: LayoutDashboard }, { label: 'รายการทั้งหมด', icon: ListFilter },
+    { label: 'ภาพรวม', icon: LayoutDashboard }, { label: 'รายการทั้งหมด', icon: ListFilter }, { label: 'รายงาน', icon: TrendingUp },
     { label: 'งบประมาณ', icon: SlidersHorizontal }, { label: 'บัญชีเงิน', icon: Wallet },
-    { label: 'ครอบครัว', icon: Users }, { label: 'ถังขยะ', icon: Trash2 },
+    { label: 'ครอบครัว', icon: Users }, { label: 'หมวดหมู่', icon: Tag }, { label: 'ถังขยะ', icon: Trash2 },
   ]
-  const monthText = monthIndex === 0 ? 'กันยายน 2569' : monthIndex < 0 ? 'สิงหาคม 2569' : 'ตุลาคม 2569'
+  const monthText = new Intl.DateTimeFormat('th-TH', { month: 'long', year: 'numeric', timeZone: 'Asia/Bangkok' }).format(new Date(`${dateFrom}T12:00:00+07:00`))
+  function selectCurrentMonth() {
+    const today = bangkokToday()
+    setDateFrom(monthStart(today)); setDateTo(today); setRange('เดือนนี้')
+  }
+
+  function selectRecentSixMonths() {
+    if (range === '6 เดือน') return selectCurrentMonth()
+    const today = bangkokToday()
+    const [year, month] = today.slice(0, 7).split('-').map(Number)
+    const first = new Date(Date.UTC(year, month - 1 - 5, 1))
+    setDateFrom(`${first.getUTCFullYear()}-${String(first.getUTCMonth() + 1).padStart(2, '0')}-01`)
+    setDateTo(today); setRange('6 เดือน')
+  }
 
   async function signOut() {
     await fetch('/api/auth/logout', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })
@@ -291,7 +566,7 @@ function App() {
         <button className="workspace-switch"><div className="workspace-avatar">{scope === 'family' ? (authUser.families.find((family) => family.id === activeFamilyId)?.name || 'บ').slice(0, 1) : authUser.displayName.slice(0, 1)}</div><div className="workspace-copy"><strong>{scope === 'family' ? authUser.families.find((family) => family.id === activeFamilyId)?.name || 'ยังไม่มีครอบครัว' : 'พื้นที่ส่วนตัว'}</strong><span>{scope === 'family' ? `${familyInfo.find((family) => family.id === activeFamilyId)?.members.length || 0} สมาชิก` : 'บัญชีส่วนตัว'}</span></div><ChevronDown size={15} /></button>
         <div className="nav-label">เมนูหลัก</div>
         <nav className="nav-list">
-          {navItems.map(({ label, icon: Icon }) => <button key={label} onClick={() => setPage(label)} className={`nav-item ${page === label ? 'active' : ''}`}><Icon size={18} strokeWidth={1.8} /><span>{label}</span>{label === 'งบประมาณ' && <span className="nav-count">2</span>}</button>)}
+          {navItems.map(({ label, icon: Icon }) => <button key={label} onClick={() => { setPage(label); if (label === 'รายงาน') { setKindFilter('ทั้งหมด'); setSearch('') } }} className={`nav-item ${page === label ? 'active' : ''}`}><Icon size={18} strokeWidth={1.8} /><span>{label}</span>{label === 'งบประมาณ' && budgetAlerts.length > 0 && <span className="nav-count">{budgetAlerts.length}</span>}</button>)}
         </nav>
         <div className="sidebar-bottom">
           <div className="sidebar-tip"><div className="tip-icon"><Sparkles size={16} /></div><strong>เริ่มจดได้เลย</strong><p>เพิ่มรายการใหม่เพื่อให้เห็นภาพรวมการเงินของบ้าน</p><button onClick={() => openComposer('expense')}>เพิ่มรายการ <ArrowUpRight size={14} /></button></div>
@@ -303,59 +578,61 @@ function App() {
       <main className="main-area">
         <header className="topbar">
           <div className="breadcrumb"><span>พื้นที่ครอบครัว</span><ChevronRight size={14} /><strong>{page}</strong></div>
-          <div className="topbar-actions"><span className={`prototype-pill ${apiStatus}`}><span />{apiStatus === 'connected' ? 'MySQL เชื่อมต่อ' : apiStatus === 'connecting' ? 'กำลังเชื่อม MySQL' : 'MySQL ไม่พร้อม'}</span><button className="icon-button notification-button" aria-label="การแจ้งเตือน" onClick={() => notify('ไม่มีการแจ้งเตือนใหม่')}><Bell size={18} /><i /></button><div className="avatar small-avatar">{authUser.displayName.slice(0, 1)}</div></div>
+          <div className="topbar-actions"><span className={`prototype-pill ${apiStatus}`}><span />{apiStatus === 'connected' ? 'MySQL เชื่อมต่อ' : apiStatus === 'connecting' ? 'กำลังเชื่อม MySQL' : 'MySQL ไม่พร้อม'}</span><button className="icon-button notification-button" aria-label="การแจ้งเตือนงบประมาณ" onClick={() => budgetAlerts.length ? (setPage('งบประมาณ'), notify(`มีงบถึงเกณฑ์แจ้งเตือน ${budgetAlerts.length} หมวด`)) : notify('ยังไม่มีงบที่ถึงเกณฑ์แจ้งเตือน')}><Bell size={18} />{budgetAlerts.length > 0 && <i />}</button><div className="avatar small-avatar">{authUser.displayName.slice(0, 1)}</div></div>
         </header>
 
         <div className="content-wrap">
-          <div className="prototype-warning"><strong>ยังไม่พร้อมเปิดใช้งานผ่านโดเมน</strong><span>เพิ่มการแก้ไข/ถังขยะ/ประวัติรายการแล้ว แต่ยังต้องตรวจสิทธิ์และรายการเงินจริง รวมถึงงบกับบัญชีเงินยังเป็นข้อมูลตัวอย่าง</span></div>
+          {apiStatus === 'offline' && <div className="prototype-warning"><strong>เชื่อมต่อฐานข้อมูลไม่ได้</strong><span>ข้อมูลล่าสุดยังโหลดไม่สำเร็จ กรุณาตรวจสอบสถานะระบบแล้วลองใหม่</span></div>}
           <div className="page-heading">
             <div><div className="eyebrow"><span className="eyebrow-dot" /> ภาพรวมการเงิน</div><h1>{page === 'ภาพรวม' ? `สวัสดี, ${authUser.displayName}` : page}</h1><p>{page === 'ภาพรวม' ? 'มาดูภาพรวมการเงินของบ้านในเดือนนี้กัน' : 'ดูข้อมูลและจัดการรายการของคุณได้ที่นี่'}</p></div>
-            <div className="heading-actions"><button className="secondary-button" onClick={() => notify('เตรียมดาวน์โหลดรายงานตัวอย่าง')}><Download size={16} /> <span>ส่งออกรายงาน</span></button><button className="primary-button" onClick={() => openComposer('expense')}><Plus size={17} /> เพิ่มรายการ</button></div>
+            <div className="heading-actions"><button className="secondary-button" onClick={exportReport}><Download size={16} /> <span>ส่งออกรายงาน</span></button><button className="primary-button" onClick={() => openComposer('expense')}><Plus size={17} /> เพิ่มรายการ</button></div>
           </div>
 
           <div className="toolbar">
             <div className="scope-switch" role="tablist" aria-label="ขอบเขตข้อมูล"><button className={scope === 'family' ? 'selected' : ''} onClick={() => setScope('family')} disabled={!authUser.families.length}><Users size={15} /> ครอบครัว</button><button className={scope === 'personal' ? 'selected' : ''} onClick={() => setScope('personal')}><Wallet size={15} /> ส่วนตัว</button>{scope === 'family' && authUser.families.length > 1 && <select aria-label="เลือกครอบครัว" value={activeFamilyId ?? ''} onChange={(event) => setActiveFamilyId(Number(event.target.value))}>{authUser.families.map((family) => <option key={family.id} value={family.id}>{family.name}</option>)}</select>}</div>
-            <div className="toolbar-right"><button className="date-picker" onClick={() => setMonthIndex((value) => value === 1 ? -1 : value + 1)}><CalendarDays size={16} />{monthText}<ChevronDown size={14} /></button><div className="period-tabs">{['เดือนนี้', 'กำหนดเอง'].map((item) => <button key={item} onClick={() => setRange(item)} className={range === item ? 'period-active' : ''}>{item}</button>)}</div></div>
+            <div className="toolbar-right"><button className="date-picker" onClick={selectCurrentMonth}><CalendarDays size={16} />{monthText}<ChevronDown size={14} /></button><div className="period-tabs"><button onClick={selectCurrentMonth} className={range === 'เดือนนี้' ? 'period-active' : ''}>เดือนนี้</button><button onClick={() => setRange('กำหนดเอง')} className={range === 'กำหนดเอง' ? 'period-active' : ''}>กำหนดเอง</button></div>{range === 'กำหนดเอง' && <div className="date-range-fields"><input aria-label="ตั้งแต่วันที่" type="date" value={dateFrom} onChange={(event) => setDateFrom(event.target.value)}/><span>ถึง</span><input aria-label="ถึงวันที่" type="date" value={dateTo} onChange={(event) => setDateTo(event.target.value)}/></div>}</div>
           </div>
 
           {page === 'ภาพรวม' && <>
             <section className="summary-grid">
-              <SummaryCard label="รายรับทั้งหมด" amount={totals.income} detail="เทียบกับเดือนที่แล้ว" trend="+12.8%" tone="green" icon={<ArrowDownLeft size={18} />} spark="M2 27 C16 23 15 12 27 17 S39 10 48 13 S60 3 73 8" />
-              <SummaryCard label="รายจ่ายทั้งหมด" amount={totals.expense} detail="เทียบกับเดือนที่แล้ว" trend="-4.2%" tone="orange" icon={<ArrowUpRight size={18} />} spark="M2 23 C14 26 17 12 29 18 S43 5 53 12 S64 8 73 3" />
-              <SummaryCard label="เงินสุทธิ" amount={totals.net} detail="รายรับหักรายจ่าย" trend="+18.6%" tone="blue" icon={<Wallet size={18} />} spark="M2 25 C12 22 16 19 26 20 S39 9 49 13 S63 5 73 4" />
-              <SummaryCard label="งบที่ใช้ไป" amount={20800} detail="จากงบทั้งหมด ฿32,500" trend="64%" tone="purple" icon={<SlidersHorizontal size={18} />} spark="M2 24 C15 23 20 20 29 18 S38 14 49 14 S61 11 73 6" />
+              <SummaryCard label="รายรับทั้งหมด" amount={totals.income} detail={`${dateFrom} ถึง ${dateTo}`} trend="รายรับ" tone="green" icon={<ArrowDownLeft size={18} />} spark="M2 27 C16 23 15 12 27 17 S39 10 48 13 S60 3 73 8" />
+              <SummaryCard label="รายจ่ายทั้งหมด" amount={totals.expense} detail={`${dateFrom} ถึง ${dateTo}`} trend="รายจ่าย" tone="orange" icon={<ArrowUpRight size={18} />} spark="M2 23 C14 26 17 12 29 18 S43 5 53 12 S64 8 73 3" />
+              <SummaryCard label="เงินสุทธิ" amount={totals.net} detail="รายรับหักรายจ่าย · ไม่นับโอน" trend="สุทธิ" tone="blue" icon={<Wallet size={18} />} spark="M2 25 C12 22 16 19 26 20 S39 9 49 13 S63 5 73 4" />
+              <SummaryCard label="ยอดคงเหลือบัญชี" amount={moneyAccounts.filter((account) => scope === 'personal' ? account.ownerType === 'user' && account.ownerUserId === authUser.id : account.ownerType === 'family' && account.familyId === activeFamilyId).reduce((sum, account) => sum + account.balance, 0)} detail={`${moneyAccounts.filter((account) => scope === 'personal' ? account.ownerType === 'user' && account.ownerUserId === authUser.id : account.ownerType === 'family' && account.familyId === activeFamilyId).length} บัญชี`} trend="ยอดปัจจุบัน" tone="purple" icon={<SlidersHorizontal size={18} />} spark="M2 24 C15 23 20 20 29 18 S38 14 49 14 S61 11 73 6" />
             </section>
 
             <section className="dashboard-grid">
               <div className="panel cashflow-panel">
-                <div className="panel-header"><div><div className="panel-title">กระแสเงินสด</div><div className="panel-subtitle">ภาพรวมรายรับและรายจ่าย</div></div><button className="select-chip" onClick={() => setRange(range === 'เดือนนี้' ? '3 เดือน' : 'เดือนนี้')}>{range === 'เดือนนี้' ? '6 เดือนล่าสุด' : '3 เดือนล่าสุด'}<ChevronDown size={14} /></button></div>
-                <div className="chart-legend"><span><i className="legend-dot income-dot" /> รายรับ</span><span><i className="legend-dot expense-dot" /> รายจ่าย</span><span className="chart-total">เงินสุทธิ <b>฿35,920</b></span></div>
-                <div className="chart-wrap"><div className="y-labels"><span>60k</span><span>40k</span><span>20k</span><span>0</span></div><svg className="line-chart" viewBox="0 0 620 190" preserveAspectRatio="none" role="img" aria-label="กราฟรายรับรายจ่ายหกเดือน"><defs><linearGradient id="incomeFill" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stopColor="#2fa47a" stopOpacity=".14"/><stop offset="1" stopColor="#2fa47a" stopOpacity="0"/></linearGradient></defs><path className="grid-line" d="M0 20H620 M0 68H620 M0 116H620 M0 164H620"/><path d="M0 98 C42 86 62 106 103 75 S164 68 207 77 S269 48 310 59 S371 71 413 40 S477 54 517 31 S580 46 620 19 V180 H0Z" fill="url(#incomeFill)"/><path className="income-line" d="M0 98 C42 86 62 106 103 75 S164 68 207 77 S269 48 310 59 S371 71 413 40 S477 54 517 31 S580 46 620 19"/><path className="expense-line" d="M0 136 C40 119 65 132 103 117 S165 119 207 105 S267 122 310 94 S374 111 413 86 S473 99 517 80 S579 91 620 68"/><circle className="chart-point" cx="517" cy="31" r="4"/><circle className="chart-point expense-point" cx="517" cy="80" r="4"/></svg><div className="x-labels"><span>เม.ย.</span><span>พ.ค.</span><span>มิ.ย.</span><span>ก.ค.</span><span>ส.ค.</span><span>ก.ย.</span></div></div>
+                <div className="panel-header"><div><div className="panel-title">กระแสเงินสด</div><div className="panel-subtitle">ภาพรวมรายรับและรายจ่ายในช่วงที่เลือก</div></div><button className="select-chip" onClick={selectRecentSixMonths}>{range === '6 เดือน' ? 'เดือนนี้' : '6 เดือนล่าสุด'}<ChevronDown size={14} /></button></div>
+                <div className="chart-legend"><span><i className="legend-dot income-dot" /> รายรับ ฿{formatMoney(totals.income)}</span><span><i className="legend-dot expense-dot" /> รายจ่าย ฿{formatMoney(totals.expense)}</span><span className="chart-total">เงินสุทธิ <b>฿{formatMoney(totals.net)}</b></span></div>
+                <div className="category-spend-list">{categoryTotals.length ? categoryTotals.map(([name, amount]) => <BudgetRow key={name} icon={categoryItems.find((item) => item.name === name && item.kind === 'expense')?.icon || '🧾'} name={name} used={amount} limit={categoryTotals[0][1]} color="teal"/>) : <div className="empty-state">ยังไม่มีรายจ่ายในช่วงวันที่เลือก</div>}</div>
               </div>
 
-              <div className="panel budget-panel"><div className="panel-header"><div><div className="panel-title">งบประมาณตามหมวด</div><div className="panel-subtitle">ใช้ไป ฿20,800 จาก ฿32,500</div></div><button className="more-button" onClick={() => setPage('งบประมาณ')}>ดูทั้งหมด <ChevronRight size={14} /></button></div><div className="budget-list"><BudgetRow icon="🏠" name="บ้านและที่พัก" used={8500} limit={10000} color="teal"/><BudgetRow icon="🍜" name="อาหารและเครื่องดื่ม" used={6240} limit={8000} color="orange"/><BudgetRow icon="🚗" name="เดินทาง" used={2860} limit={5000} color="blue"/><BudgetRow icon="📚" name="การศึกษา" used={3200} limit={6000} color="purple"/></div><button className="budget-footer" onClick={() => setPage('งบประมาณ')}>จัดการงบประมาณ <ArrowUpRight size={14} /></button></div>
+              <div className="panel budget-panel"><div className="panel-header"><div><div className="panel-title">หมวดรายจ่ายสูงสุด</div><div className="panel-subtitle">คำนวณจากรายการในช่วงที่เลือก</div></div><button className="more-button" onClick={() => setPage('รายการทั้งหมด')}>ดูรายการ <ChevronRight size={14} /></button></div>{categoryTotals.slice(0, 3).map(([name, amount]) => <BudgetRow key={name} icon={categoryItems.find((item) => item.name === name && item.kind === 'expense')?.icon || '🧾'} name={name} used={amount} limit={categoryTotals[0][1]} color="orange"/>)}{!categoryTotals.length && <div className="empty-state">ยังไม่มีรายการในช่วงนี้</div>}</div>
             </section>
 
             <section className="lower-grid">
               <div className="panel transactions-panel"><div className="panel-header transaction-heading"><div><div className="panel-title">รายการล่าสุด</div><div className="panel-subtitle">กิจกรรมการเงินของคุณและครอบครัว</div></div><button className="more-button" onClick={() => setPage('รายการทั้งหมด')}>ดูรายการทั้งหมด <ChevronRight size={14} /></button></div><TransactionTable rows={filtered.slice(0, 5)} /></div>
-              <div className="panel accounts-panel"><div className="panel-header"><div><div className="panel-title">บัญชีเงิน</div><div className="panel-subtitle">ยอดคงเหลือรวม ฿48,260</div></div><button className="icon-button tiny" onClick={() => setPage('บัญชีเงิน')} aria-label="ดูบัญชีเงิน"><ArrowUpRight size={16}/></button></div><AccountRow icon={<Banknote size={17}/>} title="เงินสด" owner="ครอบครัว" amount="4,820" tone="mint"/><AccountRow icon={<Landmark size={17}/>} title="KBank •• 4821" owner="พิมพ์ชนก" amount="28,440" tone="violet"/><AccountRow icon={<CreditCard size={17}/>} title="SCB •• 1092" owner="ครอบครัว" amount="15,000" tone="blue"/><div className="account-note"><span className="note-check"><Check size={13}/></span> อัปเดตล่าสุดวันนี้ เวลา 10:42</div></div>
+              <div className="panel accounts-panel"><div className="panel-header"><div><div className="panel-title">บัญชีเงิน</div><div className="panel-subtitle">ยอดคงเหลือรวม ฿{formatMoney(moneyAccounts.filter((account) => scope === 'personal' ? account.ownerType === 'user' && account.ownerUserId === authUser.id : account.ownerType === 'family' && account.familyId === activeFamilyId).reduce((sum, account) => sum + account.balance, 0))}</div></div><button className="icon-button tiny" onClick={() => setPage('บัญชีเงิน')} aria-label="ดูบัญชีเงิน"><ArrowUpRight size={16}/></button></div>{moneyAccounts.filter((account) => scope === 'personal' ? account.ownerType === 'user' && account.ownerUserId === authUser.id : account.ownerType === 'family' && account.familyId === activeFamilyId).slice(0, 4).map((account) => <AccountRow key={account.id} icon={account.accountType === 'cash' ? <Banknote size={17}/> : account.accountType === 'bank' ? <Landmark size={17}/> : <CreditCard size={17}/>} title={account.name} owner={account.ownerType === 'family' ? 'ครอบครัว' : 'ส่วนตัว'} amount={formatMoney(account.balance)} tone={account.accountType === 'cash' ? 'mint' : account.accountType === 'bank' ? 'violet' : 'blue'}/>)}{!moneyAccounts.length && <div className="empty-state">ยังไม่มีบัญชีเงิน</div>}</div>
             </section>
           </>}
 
-          {page !== 'ภาพรวม' && <PageContent page={page} rows={filtered} search={search} familyInfo={familyInfo} activeFamilyId={activeFamilyId} inviteLink={inviteLink} onCreateInvitation={createInvitation} onRevokeInvitation={revokeInvitation} onLeaveFamily={leaveFamily} onCloseInvite={() => setInviteLink('')} onSearch={setSearch} kindFilter={kindFilter} onKindFilter={setKindFilter} onAdd={() => openComposer(page === 'รายการทั้งหมด' ? 'expense' : 'income')} onEdit={editTransaction} onTrash={trashTransaction} onRestore={restoreTransaction} onHistory={viewHistory} onToast={notify} />}
+          {page !== 'ภาพรวม' && <PageContent page={page} rows={filtered} search={search} familyInfo={familyInfo} activeFamilyId={activeFamilyId} inviteLink={inviteLink} onCreateInvitation={createInvitation} onRevokeInvitation={revokeInvitation} onLeaveFamily={leaveFamily} onCloseInvite={() => setInviteLink('')} onSearch={setSearch} kindFilter={kindFilter} onKindFilter={setKindFilter} onAdd={() => openComposer(page === 'รายการทั้งหมด' ? 'expense' : 'income')} onEdit={editTransaction} onTrash={trashTransaction} onRestore={restoreTransaction} onHistory={viewHistory} onDeleteReceipt={deleteReceipt} onToast={notify} scope={scope} moneyAccounts={moneyAccounts.filter((account) => scope === 'family' ? account.ownerType === 'family' && account.familyId === activeFamilyId : account.ownerType === 'user' && account.ownerUserId === authUser.id)} categories={categoryItems.filter((category) => category.ownerType === (scope === 'family' ? 'family' : 'user') && category.ownerRef === (scope === 'family' ? activeFamilyId : authUser.id))} budgets={budgets} onCreateBudget={createBudget} onMoveBudget={moveBudget} onManageBudget={manageBudget} onCreateAccount={() => setAccountDialog(true)} onEditAccount={editMoneyAccount} onArchiveAccount={archiveMoneyAccount} onCreateCategory={createCategory} onEditCategory={editCategory} onArchiveCategory={archiveCategory} canManageFamilyFinancials={familyInfo.find((family) => family.id === activeFamilyId)?.role === 'owner'} />}
         </div>
       </main>
 
       <button className="mobile-add" onClick={() => openComposer('expense')}><Plus size={22}/></button>
 
-      {modal && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setModal(false) }}><div className="composer-modal" role="dialog" aria-modal="true" aria-labelledby="composer-title"><div className="modal-heading"><div><div className="modal-kicker">{editingTransactionId ? 'แก้ไขรายการ' : 'เพิ่มรายการใหม่'}</div><h2 id="composer-title">{editingTransactionId ? 'ปรับข้อมูลการเงิน' : 'บันทึกการเงิน'}</h2></div><button className="icon-button" onClick={() => setModal(false)} aria-label="ปิด"><X size={19}/></button></div><div className="kind-tabs">{([{key:'expense',label:'รายจ่าย',icon:<ArrowUpRight size={15}/>},{key:'income',label:'รายรับ',icon:<ArrowDownRight size={15}/>},{key:'transfer',label:'โอนเงิน',icon:<ArrowLeftRight size={15}/>} ] as const).map((item) => <button key={item.key} type="button" className={formKind === item.key ? `${item.key} active` : ''} onClick={() => { setFormKind(item.key); setFormCategory(item.key === 'income' ? 'เงินเดือน' : 'อาหาร') }}>{item.icon}{item.label}</button>)}</div><form onSubmit={saveTransaction}>
+      {modal && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) void closeComposer() }}><div className="composer-modal" role="dialog" aria-modal="true" aria-labelledby="composer-title"><div className="modal-heading"><div><div className="modal-kicker">{editingTransactionId ? 'แก้ไขรายการ' : 'เพิ่มรายการใหม่'}</div><h2 id="composer-title">{editingTransactionId ? 'ปรับข้อมูลการเงิน' : 'บันทึกการเงิน'}</h2></div><button className="icon-button" onClick={() => void closeComposer()} aria-label="ปิด"><X size={19}/></button></div><div className="kind-tabs">{([{key:'expense',label:'รายจ่าย',icon:<ArrowUpRight size={15}/>},{key:'income',label:'รายรับ',icon:<ArrowDownRight size={15}/>},{key:'transfer',label:'โอนเงิน',icon:<ArrowLeftRight size={15}/>} ] as const).map((item) => <button key={item.key} type="button" className={formKind === item.key ? `${item.key} active` : ''} onClick={() => { setFormKind(item.key); setFormCategory(item.key === 'income' ? 'เงินเดือน' : 'อาหาร') }}>{item.icon}{item.label}</button>)}</div><form onSubmit={saveTransaction}>
         <div className="amount-field"><label htmlFor="amount">จำนวนเงิน</label><div><span>฿</span><input id="amount" inputMode="decimal" value={formAmount} onChange={(event) => setFormAmount(event.target.value)} placeholder="0.00" required /></div></div>
-        <div className="form-row"><label>ขอบเขต</label><div className="scope-options"><button type="button" className={formScope === 'family' ? 'chosen' : ''} onClick={() => { setFormScope('family'); setFormOwner(authUser.displayName); setFormPayer(authUser.displayName) }}><Users size={15}/> ครอบครัว</button><button type="button" className={formScope === 'personal' ? 'chosen' : ''} onClick={() => { setFormScope('personal'); setFormOwner(authUser.displayName); setFormPayer(authUser.displayName) }}><Wallet size={15}/> ส่วนตัว</button></div></div>
-        <div className={`form-grid ${formKind === 'transfer' ? 'single' : ''}`}><label className="input-label">{formKind === 'income' ? 'ที่มาของรายรับ' : formKind === 'transfer' ? 'รายละเอียดการโอน' : 'ชื่อรายการ'}<input value={formTitle} onChange={(event) => setFormTitle(event.target.value)} placeholder={formKind === 'income' ? 'เช่น เงินเดือน' : formKind === 'transfer' ? 'เช่น โอนให้แม่' : 'เช่น ซื้อของเข้าบ้าน'} /></label>{formKind !== 'transfer' && <label className="input-label">หมวดหมู่<select value={formCategory} onChange={(event) => setFormCategory(event.target.value)}>{categories[formKind].map((item) => <option key={item}>{item}</option>)}</select></label>}</div>
-        {formKind === 'transfer' ? <div className="form-grid"><label className="input-label">บัญชีต้นทาง<select value={formAccount} onChange={(event) => setFormAccount(event.target.value)}><option>เงินสด</option><option>KBank •• 4821</option><option>SCB •• 1092</option></select></label><label className="input-label">บัญชีปลายทาง<select value={formDestination} onChange={(event) => setFormDestination(event.target.value)}><option>เงินสด</option><option>KBank •• 4821</option><option>SCB •• 1092</option></select></label></div> : <><div className="form-grid"><label className="input-label">บัญชีเงิน<select value={formAccount} onChange={(event) => setFormAccount(event.target.value)}><option>เงินสด</option><option>KBank •• 4821</option><option>SCB •• 1092</option></select></label>{formKind === 'expense' && <label className="input-label">ผู้จ่าย<select value={formPayer} onChange={(event) => setFormPayer(event.target.value)}><option>{authUser.displayName}</option>{formScope === 'family' && <option>ครอบครัว</option>}</select></label>}</div><div className="form-grid"><label className="input-label">เจ้าของรายการ<select value={formOwner} onChange={(event) => setFormOwner(event.target.value)}><option>{authUser.displayName}</option>{formScope === 'family' && <option>ครอบครัว</option>}</select></label></div></>}
-        {formKind === 'expense' && <div className="receipt-box">{filePreview ? <div className="receipt-preview"><img src={filePreview} alt="ภาพสลิปที่เลือก"/><div><strong><Sparkles size={14}/> ข้อมูลที่อ่านได้ (ตัวอย่าง)</strong><span>ร้านกาแฟ · ฿185 · วันนี้</span><button type="button" onClick={() => fileInput.current?.click()}>เลือกภาพอื่น</button></div></div> : <button type="button" className="receipt-select" onClick={() => fileInput.current?.click()}><span className="receipt-icon"><FileImage size={19}/></span><span><strong>แนบสลิปหรือใบเสร็จ</strong><small>เลือกภาพจากคลังหรือถ่ายภาพ</small></span><Upload size={16}/></button>}<input ref={fileInput} type="file" accept="image/*" capture="environment" hidden onChange={handleImage}/></div>}
-        <div className="modal-footer"><span><CircleHelp size={14}/> ผู้บันทึก: คุณ</span><button type="button" className="secondary-button" onClick={() => setModal(false)}>ยกเลิก</button><button type="submit" className="primary-button"><Check size={16}/> บันทึกรายการ</button></div>
+        <div className="form-grid"><label className="input-label">วันที่รายการ<input type="date" value={formDate} onChange={(event) => setFormDate(event.target.value)} required/></label></div>
+        <div className="form-row"><label>ขอบเขต</label><div className="scope-options"><button type="button" disabled={!authUser.families.length} className={formScope === 'family' ? 'chosen' : ''} onClick={() => { setFormScope('family'); setFormOwner(authUser.displayName); setFormPayer(authUser.displayName) }}><Users size={15}/> ครอบครัว</button><button type="button" className={formScope === 'personal' ? 'chosen' : ''} onClick={() => { setFormScope('personal'); setFormOwner(authUser.displayName); setFormPayer(authUser.displayName) }}><Wallet size={15}/> ส่วนตัว</button></div></div>
+        <div className={`form-grid ${formKind === 'transfer' ? 'single' : ''}`}><label className="input-label">{formKind === 'income' ? 'ที่มาของรายรับ' : formKind === 'transfer' ? 'รายละเอียดการโอน' : 'ชื่อรายการ'}<input value={formTitle} onChange={(event) => setFormTitle(event.target.value)} placeholder={formKind === 'income' ? 'เช่น เงินเดือน' : formKind === 'transfer' ? 'เช่น โอนให้แม่' : 'เช่น ซื้อของเข้าบ้าน'} /></label>{formKind !== 'transfer' && <label className="input-label">หมวดหมู่<select value={formCategoryId} onChange={(event) => { setFormCategoryId(event.target.value); setFormCategory(formCategories.find((category) => String(category.id) === event.target.value)?.name || '') }} required><option value="">เลือกหมวดหมู่</option>{formCategories.map((category) => <option key={category.id} value={category.id}>{category.icon} {category.name}</option>)}</select></label>}</div>
+        {formKind === 'transfer' ? <div className="form-grid"><label className="input-label">บัญชีต้นทาง<select value={formAccountId} onChange={(event) => { const account = formAccounts.find((item) => String(item.id) === event.target.value); setFormAccountId(event.target.value); setFormAccount(account?.name || '') }} required><option value="">เลือกบัญชีต้นทาง</option>{formAccounts.map((account) => <option key={account.id} value={account.id}>{account.name} · {account.ownerType === 'family' ? 'ครอบครัว' : 'ส่วนตัว'}</option>)}</select></label><label className="input-label">บัญชีปลายทาง<select value={formDestinationId} onChange={(event) => { const account = formAccounts.find((item) => String(item.id) === event.target.value); const recipient = transferRecipientAccounts.find((item) => String(item.id) === event.target.value); setFormDestinationId(event.target.value); setFormDestination(account?.name || (recipient ? `${recipient.ownerName} · ${recipient.accountType === 'cash' ? 'เงินสด' : recipient.accountType === 'bank' ? 'บัญชีธนาคาร' : 'บัญชีอื่น'}` : '')) }} required><option value="">เลือกบัญชีปลายทาง</option>{formAccounts.filter((account) => String(account.id) !== formAccountId).map((account) => <option key={account.id} value={account.id}>{account.name} · {account.ownerType === 'family' ? 'ครอบครัว' : 'ส่วนตัว'}</option>)}{formScope === 'family' && transferRecipientAccounts.map((account) => <option key={account.id} value={account.id}>{account.ownerName} · {account.accountType === 'cash' ? 'เงินสด' : account.accountType === 'bank' ? 'บัญชีธนาคาร' : 'บัญชีอื่น'}</option>)}</select></label></div> : <><div className="form-grid"><label className="input-label">{formKind === 'income' ? 'บัญชีรับเงิน' : 'บัญชีจ่ายเงิน'}<select value={formAccountId} onChange={(event) => { const account = formAccounts.find((item) => String(item.id) === event.target.value); setFormAccountId(event.target.value); setFormAccount(account?.name || '') }} required><option value="">เลือกบัญชีเงิน</option>{formAccounts.map((account) => <option key={account.id} value={account.id}>{account.name} · {account.ownerType === 'family' ? 'ครอบครัว' : 'ส่วนตัว'}</option>)}</select></label>{formKind === 'expense' && <label className="input-label">ผู้จ่าย<select value={formPayer} onChange={(event) => setFormPayer(event.target.value)}><option>{authUser.displayName}</option>{formScope === 'family' && <><option>ครอบครัว</option>{familyInfo.find((family) => family.id === activeFamilyId)?.members.filter((member) => member.displayName !== authUser.displayName).map((member) => <option key={member.id}>{member.displayName}</option>)}</>}</select></label>}</div><div className="form-grid"><label className="input-label">เจ้าของรายการ<select value={formOwner} onChange={(event) => setFormOwner(event.target.value)}><option>{authUser.displayName}</option>{formScope === 'family' && <><option>ครอบครัว</option>{familyInfo.find((family) => family.id === activeFamilyId)?.members.filter((member) => member.displayName !== authUser.displayName).map((member) => <option key={member.id}>{member.displayName}</option>)}</>}</select></label></div></>}
+        {formKind === 'expense' && <div className="receipt-box">{filePreview ? <div className="receipt-preview"><img src={filePreview} alt="ภาพสลิปที่เลือก"/><div><strong><Sparkles size={14}/> {receiptId ? (receiptOcrAvailable ? 'ผลสแกนจากภาพ · โปรดตรวจสอบ' : 'บันทึกภาพแล้ว · กรอกข้อมูลเอง') : 'กำลังอัปโหลดและสแกนภาพ…'}</strong><span>{receiptSuggestion?.merchant || selectedReceipt?.name || 'ไม่พบชื่อร้าน'}{receiptSuggestion?.amount ? ` · ฿${formatMoney(receiptSuggestion.amount)}` : ''}{receiptSuggestion?.date ? ` · ${receiptSuggestion.date}` : ''}</span>{receiptSuggestion?.category && <small>หมวดที่แนะนำ: {receiptSuggestion.category}</small>}{receiptSuggestion?.rawText && <details><summary>อ่านข้อความจากสลิป</summary><pre>{receiptSuggestion.rawText}</pre></details>}<button type="button" onClick={() => fileInput.current?.click()}>เลือกภาพอื่น</button></div></div> : <button type="button" className="receipt-select" onClick={() => fileInput.current?.click()}><span className="receipt-icon"><FileImage size={19}/></span><span><strong>แนบสลิปหรือใบเสร็จ</strong><small>เลือกภาพจากคลังหรือถ่ายภาพ · สูงสุด 6 MB</small></span><Upload size={16}/></button>}<input ref={fileInput} type="file" accept="image/jpeg,image/png,image/webp" capture="environment" hidden onChange={handleImage}/></div>}
+        <div className="modal-footer"><span><CircleHelp size={14}/> ผู้บันทึก: {authUser.displayName}</span><button type="button" className="secondary-button" onClick={() => void closeComposer()}>ยกเลิก</button><button type="submit" className="primary-button" disabled={Boolean(selectedReceipt && !receiptId)}><Check size={16}/>{editingTransactionId ? 'บันทึกการแก้ไข' : 'บันทึกรายการ'}</button></div>
         </form></div></div>}
+      {accountDialog && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setAccountDialog(false) }}><div className="composer-modal" role="dialog" aria-modal="true" aria-labelledby="account-dialog-title"><div className="modal-heading"><div><div className="modal-kicker">บัญชีเงินจริง</div><h2 id="account-dialog-title">เพิ่มบัญชีเงิน</h2></div><button className="icon-button" onClick={() => setAccountDialog(false)} aria-label="ปิด"><X size={19}/></button></div><form onSubmit={saveMoneyAccount}><label className="input-label">ชื่อบัญชี<input value={accountName} onChange={(event) => setAccountName(event.target.value)} maxLength={100} placeholder="เช่น เงินสด, ธนาคารกสิกร" required/></label><div className="form-grid"><label className="input-label">ประเภทบัญชี<select value={accountType} onChange={(event) => setAccountType(event.target.value as 'cash' | 'bank' | 'other')}><option value="cash">เงินสด</option><option value="bank">ธนาคาร</option><option value="other">อื่น ๆ</option></select></label><label className="input-label">ยอดตั้งต้น (บาท)<input type="number" min="0" step="0.01" value={accountOpeningBalance} onChange={(event) => setAccountOpeningBalance(event.target.value)} required/></label></div><label className="input-label">วันที่เริ่มต้นยอด<input type="date" value={accountOpeningDate} onChange={(event) => setAccountOpeningDate(event.target.value)} required/></label><div className="modal-footer"><span>{scope === 'family' ? 'บัญชีของครอบครัว' : 'บัญชีส่วนตัว'}</span><button type="button" className="secondary-button" onClick={() => setAccountDialog(false)}>ยกเลิก</button><button type="submit" className="primary-button"><Check size={16}/> สร้างบัญชี</button></div></form></div></div>}
       {historyEntries && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setHistoryEntries(null) }}><div className="composer-modal history-modal" role="dialog" aria-modal="true" aria-labelledby="history-title"><div className="modal-heading"><div><div className="modal-kicker">ตรวจสอบการเปลี่ยนแปลง</div><h2 id="history-title">ประวัติรายการ</h2></div><button className="icon-button" onClick={() => setHistoryEntries(null)} aria-label="ปิด"><X size={19}/></button></div>{historyEntries.length ? historyEntries.map((entry) => <div className="history-entry" key={entry.id}><strong>{entry.action === 'created' ? 'สร้างรายการ' : entry.action === 'updated' ? 'แก้ไขรายการ' : entry.action === 'trashed' ? 'ย้ายไปถังขยะ' : 'กู้คืนรายการ'}</strong><span>{entry.actor} · {new Date(entry.createdAt).toLocaleString('th-TH')}</span><small>{entry.before ? `${entry.before.title} · ฿${entry.before.amount} · ${entry.before.category}` : '—'} → {entry.after ? `${entry.after.title} · ฿${entry.after.amount} · ${entry.after.category}` : '—'}</small></div>) : <div className="empty-state">ยังไม่มีประวัติการเปลี่ยนแปลง</div>}</div></div>}
       {toast && <div className="toast"><Check size={16}/>{toast}</div>}
     </div>
@@ -411,20 +688,27 @@ function BudgetRow({ icon, name, used, limit, color }: { icon: string; name: str
   return <div className="budget-row"><div className="budget-row-top"><span className="budget-name"><span className="budget-emoji">{icon}</span>{name}</span><span className="budget-amount"><b>฿{formatMoney(used)}</b><span> / ฿{formatMoney(limit)}</span></span></div><div className="progress-track"><span className={`progress-fill ${color}`} style={{ width: `${percent}%` }}/></div><div className="budget-percent">ใช้ไป {percent}%</div></div>
 }
 
-function TransactionTable({ rows, onEdit, onTrash, onRestore, onHistory }: { rows: Transaction[]; onEdit?: (item: Transaction) => void; onTrash?: (item: Transaction) => void; onRestore?: (item: Transaction) => void; onHistory?: (item: Transaction) => void }) {
-  return <div className="transaction-table"><div className="table-head"><span>รายการ</span><span>วันที่</span><span>บัญชีเงิน</span><span>เจ้าของรายการ</span><span className="align-right">จำนวนเงิน</span></div>{rows.length ? rows.map((item) => <div className="transaction-row" key={item.id}><div className="transaction-name"><span className={`transaction-icon ${item.kind}`}>{item.icon}</span><span><strong>{item.title}</strong><small>{item.category}</small></span>{(onEdit || onTrash || onRestore || onHistory) && <div className="transaction-actions">{onEdit && <button title="แก้ไขรายการ" aria-label={`แก้ไข ${item.title}`} onClick={() => onEdit(item)}><Settings2 size={14}/></button>}{onTrash && <button title="ย้ายไปถังขยะ" aria-label={`ลบ ${item.title}`} onClick={() => onTrash(item)}><Trash2 size={14}/></button>}{onRestore && <button title="กู้คืนรายการ" aria-label={`กู้คืน ${item.title}`} onClick={() => onRestore(item)}><RotateCcw size={14}/></button>}{onHistory && <button title="ประวัติรายการ" aria-label={`ประวัติ ${item.title}`} onClick={() => onHistory(item)}><History size={14}/></button>}</div>}</div><span className="transaction-date">{item.date}</span><span className="transaction-account">{item.account}</span><span className="owner-chip"><i className={item.owner === 'ครอบครัว' ? 'family-dot' : ''}/><span>{item.owner}<small>{item.kind === 'expense' ? `จ่ายโดย ${item.payer ?? item.recorder}` : `บันทึกโดย ${item.recorder}`}</small></span></span><strong className={`transaction-amount ${item.kind}`}>{item.kind === 'income' ? '+' : item.kind === 'transfer' ? '↗ ' : '−'}฿{formatMoney(item.amount)}</strong></div>) : <div className="empty-state"><Search size={20}/>{onRestore ? 'ถังขยะว่างเปล่า' : 'ไม่พบรายการที่ตรงกับตัวกรอง'}</div>}</div>
+function TransactionTable({ rows, onEdit, onTrash, onRestore, onHistory, onDeleteReceipt }: { rows: Transaction[]; onEdit?: (item: Transaction) => void; onTrash?: (item: Transaction) => void; onRestore?: (item: Transaction) => void; onHistory?: (item: Transaction) => void; onDeleteReceipt?: (item: Transaction) => void }) {
+  return <div className="transaction-table"><div className="table-head"><span>รายการ</span><span>วันที่</span><span>บัญชีเงิน</span><span>เจ้าของรายการ</span><span className="align-right">จำนวนเงิน</span></div>{rows.length ? rows.map((item) => <div className="transaction-row" key={item.id}><div className="transaction-name"><span className={`transaction-icon ${item.kind}`}>{item.icon}</span><span><strong>{item.title}</strong><small>{item.category}</small></span>{(onEdit || onTrash || onRestore || onHistory || item.receiptId) && <div className="transaction-actions">{item.receiptId && <><button title="ดูภาพสลิป" aria-label={`ดูสลิป ${item.title}`} onClick={() => window.open(`/api/receipts/${item.receiptId}/content`, '_blank', 'noopener')}><FileImage size={14}/></button>{onDeleteReceipt && <button title="ลบภาพสลิป" aria-label={`ลบสลิป ${item.title}`} onClick={() => onDeleteReceipt(item)}><X size={14}/></button>}</>}{onEdit && <button title="แก้ไขรายการ" aria-label={`แก้ไข ${item.title}`} onClick={() => onEdit(item)}><Settings2 size={14}/></button>}{onTrash && <button title="ย้ายไปถังขยะ" aria-label={`ลบ ${item.title}`} onClick={() => onTrash(item)}><Trash2 size={14}/></button>}{onRestore && <button title="กู้คืนรายการ" aria-label={`กู้คืน ${item.title}`} onClick={() => onRestore(item)}><RotateCcw size={14}/></button>}{onHistory && <button title="ประวัติรายการ" aria-label={`ประวัติ ${item.title}`} onClick={() => onHistory(item)}><History size={14}/></button>}</div>}</div><span className="transaction-date">{item.date}</span><span className="transaction-account">{item.account}</span><span className="owner-chip"><i className={item.owner === 'ครอบครัว' ? 'family-dot' : ''}/><span>{item.owner}<small>{item.kind === 'expense' ? `จ่ายโดย ${item.payer ?? item.recorder}` : `บันทึกโดย ${item.recorder}`}</small></span></span><strong className={`transaction-amount ${item.kind}`}>{item.kind === 'income' ? '+' : item.kind === 'transfer' ? '↗ ' : '−'}฿{formatMoney(item.amount)}</strong></div>) : <div className="empty-state"><Search size={20}/>{onRestore ? 'ถังขยะว่างเปล่า' : 'ไม่พบรายการที่ตรงกับตัวกรอง'}</div>}</div>
 }
 
 function AccountRow({ icon, title, owner, amount, tone }: { icon: ReactNode; title: string; owner: string; amount: string; tone: string }) {
   return <div className="account-row"><div className={`account-icon ${tone}`}>{icon}</div><div className="account-copy"><strong>{title}</strong><span>{owner}</span></div><div className="account-amount"><strong>฿{amount}</strong><span>ยอดคงเหลือ</span></div></div>
 }
 
-function PageContent({ page, rows, search, familyInfo, activeFamilyId, inviteLink, onCreateInvitation, onRevokeInvitation, onLeaveFamily, onCloseInvite, onSearch, kindFilter, onKindFilter, onAdd, onEdit, onTrash, onRestore, onHistory, onToast }: { page: string; rows: Transaction[]; search: string; familyInfo: FamilyInfo[]; activeFamilyId: number | null; inviteLink: string; onCreateInvitation: (familyId: number) => void; onRevokeInvitation: (familyId: number, invitationId: number) => void; onLeaveFamily: (familyId: number) => void; onCloseInvite: () => void; onSearch: (value: string) => void; kindFilter: string; onKindFilter: (value: string) => void; onAdd: () => void; onEdit: (item: Transaction) => void; onTrash: (item: Transaction) => void; onRestore: (item: Transaction) => void; onHistory: (item: Transaction) => void; onToast: (message: string) => void }) {
-  if (page === 'ถังขยะ') return <div className="panel full-page-panel"><div className="panel-header"><div><div className="panel-title">ถังขยะ</div><div className="panel-subtitle">รายการที่ลบจะไม่รวมในสรุป และกู้คืนได้</div></div></div><TransactionTable rows={rows} onRestore={onRestore}/></div>
-  if (page === 'รายการทั้งหมด') return <div className="panel full-page-panel"><div className="list-toolbar"><div className="search-field"><Search size={16}/><input value={search} onChange={(event) => onSearch(event.target.value)} placeholder="ค้นหารายการ"/></div><select className="filter-select" value={kindFilter} onChange={(event) => onKindFilter(event.target.value)} aria-label="กรองประเภทรายการ"><option>ทั้งหมด</option><option>รายรับ</option><option>รายจ่าย</option><option>โอน</option></select><button className="primary-button" onClick={onAdd}><Plus size={16}/> เพิ่มรายการ</button></div><TransactionTable rows={rows} onEdit={onEdit} onTrash={onTrash} onHistory={onHistory}/></div>
-  if (page === 'งบประมาณ') return <div className="page-cards"><div className="panel page-budget-card"><div className="panel-header"><div><div className="panel-title">งบครอบครัว · กันยายน 2569</div><div className="panel-subtitle">ใช้ไป ฿20,800 จากงบทั้งหมด ฿32,500</div></div><button className="primary-button" onClick={() => onToast('เปิดแบบฟอร์มตั้งงบประมาณตัวอย่าง')}><Plus size={16}/> เพิ่มงบ</button></div>{[['🏠','บ้านและที่พัก',8500,10000,'teal'],['🍜','อาหารและเครื่องดื่ม',6240,8000,'orange'],['🚗','เดินทาง',2860,5000,'blue'],['📚','การศึกษา',3200,6000,'purple']].map(([icon,name,used,limit,color])=><BudgetRow key={String(name)} icon={String(icon)} name={String(name)} used={Number(used)} limit={Number(limit)} color={String(color)}/>)}</div><div className="panel page-note"><Sparkles size={20}/><strong>งบที่ใช้ไป 64%</strong><p>ต้นแบบนี้แสดงข้อมูลงบตัวอย่าง เมื่อเชื่อมระบบจริงแล้วจะคำนวณจากรายการที่ยืนยัน</p></div></div>
-  if (page === 'บัญชีเงิน') return <div className="panel full-page-panel"><div className="panel-header"><div><div className="panel-title">บัญชีเงินของครอบครัว</div><div className="panel-subtitle">ยอดรวมตัวอย่าง ฿48,260 · มียอดตั้งต้นและรายการล่าสุด</div></div><button className="primary-button" onClick={() => onToast('เพิ่มบัญชีเงินได้ในระยะเชื่อมฐานข้อมูล')}><Plus size={16}/> เพิ่มบัญชี</button></div><div className="account-page-grid"><AccountRow icon={<Banknote size={18}/>} title="เงินสดครอบครัว" owner="ครอบครัว · เงินสด" amount="4,820" tone="mint"/><AccountRow icon={<Landmark size={18}/>} title="KBank •• 4821" owner="พิมพ์ชนก · ธนาคาร" amount="28,440" tone="violet"/><AccountRow icon={<CreditCard size={18}/>} title="SCB •• 1092" owner="ครอบครัว · ธนาคาร" amount="15,000" tone="blue"/></div></div>
-  if (page === 'ครอบครัว') return <div className="page-cards"><div className="panel family-panel"><div className="panel-header"><div><div className="panel-title">สมาชิกในบ้าน</div><div className="panel-subtitle">{familyInfo.find((family) => family.id === activeFamilyId)?.name || 'พื้นที่ครอบครัว'}</div></div>{familyInfo.find((family) => family.id === activeFamilyId)?.role === 'owner' && <button className="primary-button" onClick={() => activeFamilyId && onCreateInvitation(activeFamilyId)}><Plus size={16}/> เชิญสมาชิก</button>}</div>{familyInfo.filter((family) => family.id === activeFamilyId).flatMap((family) => <section key={family.id}><div className="member-list">{family.members.map((member, index) => <div className="member-row" key={member.id}><div className={`avatar member-avatar member-${index % 4}`}>{member.displayName.slice(0, 1)}</div><div className="member-copy"><strong>{member.displayName}</strong><span>{member.email}</span></div><span className="member-badge">{member.role === 'owner' ? 'เจ้าของ' : 'สมาชิก'}</span></div>)}</div>{family.role === 'owner' && family.invitations.map((invite) => <div className="member-row" key={invite.id}><div className="avatar member-avatar">✉</div><div className="member-copy"><strong>ลิงก์เชิญรอใช้งาน</strong><span>หมดอายุ {new Date(invite.expiresAt).toLocaleString('th-TH')}</span></div><button className="secondary-button" onClick={() => onRevokeInvitation(family.id, invite.id)}>ยกเลิก</button></div>)}{family.role === 'member' && <button className="secondary-button" onClick={() => onLeaveFamily(family.id)}>ออกจากครอบครัว</button>}</section>)}{!familyInfo.length && <div className="empty-state">ยังไม่มีครอบครัวที่เข้าร่วม</div>}{inviteLink && <div className="invite-result"><strong>ลิงก์เชิญพร้อมแชร์ · ใช้ได้ 7 วัน และใช้ได้ครั้งเดียว</strong><input readOnly value={inviteLink} onFocus={(event) => event.currentTarget.select()}/><button className="primary-button" onClick={() => navigator.clipboard?.writeText(inviteLink).then(() => onToast('คัดลอกลิงก์แล้ว')).catch(() => onToast('เลือกและคัดลอกลิงก์ได้จากช่องด้านบน'))}>คัดลอกลิงก์</button><button className="secondary-button" onClick={onCloseInvite}>ปิด</button></div>}</div><div className="panel page-note"><Users size={20}/><strong>สิทธิ์สมาชิก</strong><p>สมาชิกดูรายการครอบครัวได้ การแก้ไขและการจัดการรายการยังอยู่ระหว่างพัฒนา</p></div></div>
+function PageContent({ page, rows, search, familyInfo, activeFamilyId, inviteLink, onCreateInvitation, onRevokeInvitation, onLeaveFamily, onCloseInvite, onSearch, kindFilter, onKindFilter, onAdd, onEdit, onTrash, onRestore, onHistory, onDeleteReceipt, onToast, scope, moneyAccounts, categories, budgets, onCreateBudget, onMoveBudget, onManageBudget, onCreateAccount, onEditAccount, onArchiveAccount, onCreateCategory, onEditCategory, onArchiveCategory, canManageFamilyFinancials }: { page: string; rows: Transaction[]; search: string; familyInfo: FamilyInfo[]; activeFamilyId: number | null; inviteLink: string; onCreateInvitation: (familyId: number) => void; onRevokeInvitation: (familyId: number, invitationId: number) => void; onLeaveFamily: (familyId: number) => void; onCloseInvite: () => void; onSearch: (value: string) => void; kindFilter: string; onKindFilter: (value: string) => void; onAdd: () => void; onEdit: (item: Transaction) => void; onTrash: (item: Transaction) => void; onRestore: (item: Transaction) => void; onHistory: (item: Transaction) => void; onDeleteReceipt: (item: Transaction) => void; onToast: (message: string) => void; scope: Scope; moneyAccounts: MoneyAccount[]; categories: Category[]; budgets: Budget[]; onCreateBudget: () => void; onMoveBudget: () => void; onManageBudget: (budget: Budget) => void; onCreateAccount: () => void; onEditAccount: (account: MoneyAccount) => void; onArchiveAccount: (account: MoneyAccount) => void; onCreateCategory: (kind: 'income' | 'expense', name: string) => void; onEditCategory: (category: Category) => void; onArchiveCategory: (category: Category) => void; canManageFamilyFinancials: boolean }) {
+  if (page === 'ถังขยะ') return <div className="panel full-page-panel"><div className="panel-header"><div><div className="panel-title">ถังขยะ</div><div className="panel-subtitle">รายการที่ลบจะไม่รวมในสรุป และกู้คืนได้</div></div></div><TransactionTable rows={rows} onRestore={onRestore} onDeleteReceipt={onDeleteReceipt}/></div>
+  if (page === 'รายการทั้งหมด') return <div className="panel full-page-panel"><div className="list-toolbar"><div className="search-field"><Search size={16}/><input value={search} onChange={(event) => onSearch(event.target.value)} placeholder="ค้นหารายการ"/></div><select className="filter-select" value={kindFilter} onChange={(event) => onKindFilter(event.target.value)} aria-label="กรองประเภทรายการ"><option>ทั้งหมด</option><option>รายรับ</option><option>รายจ่าย</option><option>โอน</option></select><button className="primary-button" onClick={onAdd}><Plus size={16}/> เพิ่มรายการ</button></div><TransactionTable rows={rows} onEdit={onEdit} onTrash={onTrash} onHistory={onHistory} onDeleteReceipt={onDeleteReceipt}/></div>
+  if (page === 'รายงาน') {
+    const income = rows.filter((item) => item.kind === 'income').reduce((sum, item) => sum + item.amount, 0)
+    const expense = rows.filter((item) => item.kind === 'expense').reduce((sum, item) => sum + item.amount, 0)
+    const group = (key: (item: Transaction) => string) => { const totals = new Map<string, number>(); rows.filter((item) => item.kind !== 'transfer').forEach((item) => totals.set(key(item), (totals.get(key(item)) || 0) + item.amount)); return [...totals].sort((a, b) => b[1] - a[1]) }
+    return <div className="page-cards"><div className="summary-grid"><SummaryCard label="รายรับ" amount={income} detail="ตามช่วงวันที่ที่เลือก" trend="รวม" tone="green" icon={<ArrowDownLeft size={18}/>} spark="M2 27 C16 23 15 12 27 17 S39 10 48 13 S60 3 73 8"/><SummaryCard label="รายจ่าย" amount={expense} detail="ตามช่วงวันที่ที่เลือก" trend="รวม" tone="orange" icon={<ArrowUpRight size={18}/>} spark="M2 23 C14 26 17 12 29 18 S43 5 53 12 S64 8 73 3"/><SummaryCard label="เงินสุทธิ" amount={income-expense} detail="ไม่นับรายการโอน" trend="สุทธิ" tone="blue" icon={<Wallet size={18}/>} spark="M2 25 C12 22 16 19 26 20 S39 9 49 13 S63 5 73 4"/></div><div className="panel"><div className="panel-header"><div><div className="panel-title">แยกตามหมวดหมู่</div><div className="panel-subtitle">รายรับและรายจ่ายในขอบเขตนี้</div></div></div>{group((item) => item.category).map(([name, amount]) => <BudgetRow key={name} icon={categories.find((category) => category.name === name)?.icon || '🧾'} name={name} used={amount} limit={Math.max(amount, 1)} color="teal"/>)}{!rows.length && <div className="empty-state">ไม่มีรายการในช่วงวันที่นี้</div>}</div><div className="panel"><div className="panel-header"><div><div className="panel-title">แยกตามเจ้าของรายการ</div><div className="panel-subtitle">ไม่รวมรายการโอน</div></div></div>{group((item) => item.owner).map(([name, amount]) => <BudgetRow key={name} icon="👤" name={name} used={amount} limit={Math.max(amount, 1)} color="blue"/>)}{!rows.length && <div className="empty-state">ไม่มีรายการในช่วงวันที่นี้</div>}</div><div className="panel"><div className="panel-header"><div><div className="panel-title">แยกตามบัญชีเงิน</div><div className="panel-subtitle">ยอดรายรับและรายจ่ายของบัญชีตามช่วงวันที่</div></div></div>{group((item) => item.account.split(' → ')[0]).map(([name, amount]) => <BudgetRow key={name} icon="🏦" name={name} used={amount} limit={Math.max(amount, 1)} color="purple"/>)}{!rows.length && <div className="empty-state">ไม่มีรายการในช่วงวันที่นี้</div>}</div></div>
+  }
+  if (page === 'งบประมาณ') return <div className="panel full-page-panel"><div className="panel-header"><div><div className="panel-title">งบ{scope === 'family' ? 'ครอบครัว' : 'ส่วนตัว'}</div><div className="panel-subtitle">ยอดใช้ {formatMoney(budgets.reduce((sum, budget) => sum + budget.spent, 0))} / วงเงิน {formatMoney(budgets.reduce((sum, budget) => sum + budget.amount, 0))} บาท · รอบคำนวณปัจจุบัน</div></div><div className="heading-actions">{budgets.length > 1 && (scope === 'personal' || canManageFamilyFinancials) && <button className="secondary-button" onClick={onMoveBudget}>ย้ายงบ</button>}{(scope === 'personal' || canManageFamilyFinancials) && <button className="primary-button" onClick={onCreateBudget}><Plus size={16}/> เพิ่มงบ</button>}</div></div>{budgets.length ? budgets.map((budget) => <div className="budget-live-row" key={budget.id}><BudgetRow icon={budget.icon} name={budget.category} used={budget.spent} limit={budget.amount} color={budget.spent >= budget.amount ? 'orange' : 'teal'}/><div className="budget-live-meta"><span>แจ้งเตือนเมื่อใช้ {budget.alertPercent}% · {budget.periodType === 'monthly' ? `รอบเริ่มวันที่ ${budget.cycleStartDay}` : `${budget.periodStart} ถึง ${budget.periodEnd}`}</span>{budget.spent >= budget.amount * budget.alertPercent / 100 && <strong className="budget-alert">{budget.spent > budget.amount ? 'เกินงบแล้ว' : 'ใกล้ถึงงบ'}</strong>}{(scope === 'personal' || canManageFamilyFinancials) && <button className="secondary-button" onClick={() => onManageBudget(budget)}>จัดการ</button>}</div></div>) : <div className="empty-state">ยังไม่มีงบในขอบเขตนี้</div>}</div>
+  if (page === 'บัญชีเงิน') return <div className="panel full-page-panel"><div className="panel-header"><div><div className="panel-title">บัญชีเงิน{scope === 'family' ? 'ของครอบครัว' : 'ส่วนตัว'}</div><div className="panel-subtitle">ยอดคงเหลือรวม ฿{formatMoney(moneyAccounts.reduce((sum, account) => sum + account.balance, 0))} · คำนวณจากยอดตั้งต้นและรายการที่บันทึก</div></div>{(scope === 'personal' || canManageFamilyFinancials) && <button className="primary-button" onClick={onCreateAccount}><Plus size={16}/> เพิ่มบัญชี</button>}</div><div className="account-page-grid">{moneyAccounts.map((account) => <div className="money-account-card" key={account.id}><AccountRow icon={account.accountType === 'cash' ? <Banknote size={18}/> : account.accountType === 'bank' ? <Landmark size={18}/> : <CreditCard size={18}/>} title={account.name} owner={`${account.ownerType === 'family' ? 'ครอบครัว' : 'ส่วนตัว'} · ${account.accountType === 'cash' ? 'เงินสด' : account.accountType === 'bank' ? 'ธนาคาร' : 'อื่น ๆ'}`} amount={formatMoney(account.balance)} tone={account.accountType === 'cash' ? 'mint' : account.accountType === 'bank' ? 'violet' : 'blue'}/>{(scope === 'personal' || canManageFamilyFinancials) && <div className="money-account-actions"><button onClick={() => onEditAccount(account)}>แก้ไข</button><button onClick={() => onArchiveAccount(account)}>ปิดบัญชี</button></div>}</div>)}{!moneyAccounts.length && <div className="empty-state">ยังไม่มีบัญชีเงินในขอบเขตนี้</div>}</div></div>
+  if (page === 'หมวดหมู่') return <div className="page-cards category-page"><div className="panel"><div className="panel-header"><div><div className="panel-title">หมวดหมู่{scope === 'family' ? 'ครอบครัว' : 'ส่วนตัว'}</div><div className="panel-subtitle">ใช้จัดประเภทของรายรับและรายจ่าย</div></div></div>{(['income', 'expense'] as const).map((kind) => <section key={kind} className="category-group"><div className="category-group-heading"><strong>{kind === 'income' ? 'รายรับ' : 'รายจ่าย'}</strong>{(scope === 'personal' || canManageFamilyFinancials) && <button className="secondary-button" onClick={() => { const name = window.prompt(`ชื่อหมวด${kind === 'income' ? 'รายรับ' : 'รายจ่าย'}`); if (name?.trim()) onCreateCategory(kind, name.trim()) }}><Plus size={14}/> เพิ่ม</button>}</div>{categories.filter((category) => category.kind === kind).map((category) => <div className="category-row" key={category.id}><span className="category-icon">{category.icon}</span><strong>{category.name}</strong>{category.isDefault && <small>ค่าเริ่มต้น</small>}{(scope === 'personal' || canManageFamilyFinancials) && <div className="category-actions"><button onClick={() => onEditCategory(category)}>แก้ไข</button><button onClick={() => onArchiveCategory(category)}>ซ่อน</button></div>}</div>)}</section>)}</div><div className="panel page-note"><Tag size={20}/><strong>หมวดหมู่เก็บใน MySQL</strong><p>การซ่อนหมวดหมู่จะไม่เปลี่ยนชื่อหมวดในรายการย้อนหลัง</p></div></div>
+  if (page === 'ครอบครัว') return <div className="page-cards"><div className="panel family-panel"><div className="panel-header"><div><div className="panel-title">สมาชิกในบ้าน</div><div className="panel-subtitle">{familyInfo.find((family) => family.id === activeFamilyId)?.name || 'พื้นที่ครอบครัว'}</div></div>{familyInfo.find((family) => family.id === activeFamilyId)?.role === 'owner' && <button className="primary-button" onClick={() => activeFamilyId && onCreateInvitation(activeFamilyId)}><Plus size={16}/> เชิญสมาชิก</button>}</div>{familyInfo.filter((family) => family.id === activeFamilyId).flatMap((family) => <section key={family.id}><div className="member-list">{family.members.map((member, index) => <div className="member-row" key={member.id}><div className={`avatar member-avatar member-${index % 4}`}>{member.displayName.slice(0, 1)}</div><div className="member-copy"><strong>{member.displayName}</strong><span>{member.email}</span></div><span className="member-badge">{member.role === 'owner' ? 'เจ้าของ' : 'สมาชิก'}</span></div>)}</div>{family.role === 'owner' && family.invitations.map((invite) => <div className="member-row" key={invite.id}><div className="avatar member-avatar">✉</div><div className="member-copy"><strong>ลิงก์เชิญรอใช้งาน</strong><span>หมดอายุ {new Date(invite.expiresAt).toLocaleString('th-TH')}</span></div><button className="secondary-button" onClick={() => onRevokeInvitation(family.id, invite.id)}>ยกเลิก</button></div>)}{family.role === 'member' && <button className="secondary-button" onClick={() => onLeaveFamily(family.id)}>ออกจากครอบครัว</button>}</section>)}{!familyInfo.length && <div className="empty-state">ยังไม่มีครอบครัวที่เข้าร่วม</div>}{inviteLink && <div className="invite-result"><strong>ลิงก์เชิญพร้อมแชร์ · ใช้ได้ 7 วัน และใช้ได้ครั้งเดียว</strong><input readOnly value={inviteLink} onFocus={(event) => event.currentTarget.select()}/><button className="primary-button" onClick={() => navigator.clipboard?.writeText(inviteLink).then(() => onToast('คัดลอกลิงก์แล้ว')).catch(() => onToast('เลือกและคัดลอกลิงก์ได้จากช่องด้านบน'))}>คัดลอกลิงก์</button><button className="secondary-button" onClick={onCloseInvite}>ปิด</button></div>}</div><div className="panel page-note"><Users size={20}/><strong>สิทธิ์สมาชิก</strong><p>สมาชิกดูรายการครอบครัวได้ และแก้ไขได้เฉพาะรายการที่ตนบันทึก เจ้าของครอบครัวจัดการรายการทั้งหมดได้</p></div></div>
   return <div className="panel empty-section"><Tag size={24}/><h3>{page}</h3><p>ส่วนนี้จะแสดงรายการและตัวกรองตามขอบเขตข้อมูลของคุณ</p><button className="primary-button" onClick={onAdd}><Plus size={16}/> เพิ่มรายการ</button></div>
 }
 

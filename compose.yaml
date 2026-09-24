@@ -46,7 +46,10 @@ services:
       SMTP_PASSWORD: ${SMTP_PASSWORD:-}
       SMTP_FROM: ${SMTP_FROM:-}
       SYSTEM_ADMIN_EMAIL: ${SYSTEM_ADMIN_EMAIL:-}
+      RECEIPT_STORAGE_PATH: /var/lib/saving/receipts
       TZ: Asia/Bangkok
+    volumes:
+      - saving_receipt_data:/var/lib/saving/receipts
     depends_on:
       mysql:
         condition: service_healthy
@@ -87,3 +90,4 @@ services:
 
 volumes:
   saving_mysql_data:
+  saving_receipt_data:

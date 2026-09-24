@@ -227,3 +227,4 @@ h1 { margin: 0; font-size: 23px; letter-spacing: -.45px; font-weight: 600; color
   .composer-modal .allocation-tools{gap:8px}
   .composer-modal .allocation-tools .secondary-button{min-height:42px}
 }
+.transaction-pagination{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:16px;padding-top:12px;border-top:1px solid var(--line,#edf0ec);color:var(--muted,#78837e);font-size:11px}.transaction-pagination>div{display:flex;align-items:center;gap:10px}.transaction-pagination .secondary-button{height:34px}.transaction-pagination .secondary-button:disabled{opacity:.5;cursor:not-allowed}@media(max-width:640px){.transaction-pagination{align-items:flex-start;flex-direction:column;font-size:11px}.transaction-pagination>div{width:100%;justify-content:space-between}.transaction-pagination .secondary-button{min-height:42px}}

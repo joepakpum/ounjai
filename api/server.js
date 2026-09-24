@@ -1215,6 +1215,143 @@ async function handle(request, response) {
     return send(response, 404, { error: 'ไม่พบเส้นทางนี้' })
   }
 
+  if (method === 'GET' && pathname === '/api/transactions/summary') {
+    const user = await currentUser(request)
+    if (!user) return send(response, 401, { error: 'กรุณาเข้าสู่ระบบ' })
+    const scope = url.searchParams.get('scope')
+    if (!['family', 'personal'].includes(scope)) return send(response, 400, { error: 'ขอบเขตข้อมูลไม่ถูกต้อง' })
+    const familyId = Number(url.searchParams.get('familyId')) || user.families[0]?.id || 0
+    if (scope === 'family' && !user.families.some((family) => family.id === familyId)) return send(response, 403, { error: 'คุณไม่มีสิทธิ์ดูข้อมูลครอบครัวนี้' })
+    const dateFrom = url.searchParams.get('dateFrom') || ''
+    const dateTo = url.searchParams.get('dateTo') || ''
+    if (!validDateKey(dateFrom) || !validDateKey(dateTo) || dateFrom > dateTo) return send(response, 400, { error: 'ช่วงวันที่ไม่ถูกต้อง' })
+    let baseWhere = scope === 'family'
+      ? `t.scope = 'family' AND t.family_id = ? AND EXISTS (SELECT 1 FROM family_members current_member WHERE current_member.family_id = t.family_id AND current_member.user_id = ? AND current_member.left_at IS NULL) AND t.deleted_at IS NULL AND t.occurred_at >= ? AND t.occurred_at < DATE_ADD(?, INTERVAL 1 DAY)`
+      : `t.scope = 'personal' AND t.created_by_user_id = ? AND t.deleted_at IS NULL AND t.occurred_at >= ? AND t.occurred_at < DATE_ADD(?, INTERVAL 1 DAY)`
+    const baseParams = scope === 'family' ? [familyId, user.id, `${dateFrom} 00:00:00`, `${dateTo} 00:00:00`] : [user.id, `${dateFrom} 00:00:00`, `${dateTo} 00:00:00`]
+    const kind = url.searchParams.get('kind')
+    if (kind && !['income', 'expense', 'transfer'].includes(kind)) return send(response, 400, { error: 'ประเภทรายการไม่ถูกต้อง' })
+    const search = String(url.searchParams.get('search') || '').trim().slice(0, 160)
+    if (kind) { baseWhere += ' AND t.kind = ?'; baseParams.push(kind) }
+    if (search) { baseWhere += ' AND t.title LIKE ?'; baseParams.push(`%${search.replace(/[\\%_]/g, (match) => `\\${match}`)}%`) }
+    const [totalsRows] = await pool.execute(`SELECT COALESCE(SUM(CASE WHEN t.kind = 'income' THEN t.amount ELSE 0 END), 0) AS income, COALESCE(SUM(CASE WHEN t.kind = 'expense' THEN t.amount ELSE 0 END), 0) AS expense FROM transactions t WHERE ${baseWhere}`, baseParams)
+    const [categoryRows] = await pool.execute(`
+      SELECT kind, bucket, SUM(amount) AS amount FROM (
+        SELECT t.kind, COALESCE(c.name, t.category) AS bucket, a.amount
+        FROM transactions t JOIN transaction_allocations a ON a.transaction_id = t.id
+        LEFT JOIN transaction_categories c ON c.id = a.category_id
+        WHERE ${baseWhere} AND t.kind <> 'transfer'
+        UNION ALL
+        SELECT t.kind, COALESCE(c.name, t.category) AS bucket, t.amount
+        FROM transactions t LEFT JOIN transaction_categories c ON c.id = t.category_id
+        WHERE ${baseWhere} AND t.kind <> 'transfer'
+          AND NOT EXISTS (SELECT 1 FROM transaction_allocations a WHERE a.transaction_id = t.id)
+      ) parts GROUP BY kind, bucket ORDER BY amount DESC
+    `, [...baseParams, ...baseParams])
+    const [ownerRows] = await pool.execute(`
+      SELECT bucket, SUM(amount) AS amount FROM (
+        SELECT CASE WHEN a.owner_is_family = 1 THEN 'ครอบครัว' ELSE COALESCE(allocated_user.display_name, 'ไม่ระบุ') END AS bucket, a.amount
+        FROM transactions t JOIN transaction_allocations a ON a.transaction_id = t.id
+        LEFT JOIN users allocated_user ON allocated_user.id = a.owner_user_id
+        WHERE ${baseWhere} AND t.kind <> 'transfer'
+        UNION ALL
+        SELECT COALESCE(NULLIF(t.owner_name, ''), 'ไม่ระบุ') AS bucket, t.amount
+        FROM transactions t
+        WHERE ${baseWhere} AND t.kind <> 'transfer'
+          AND NOT EXISTS (SELECT 1 FROM transaction_allocations a WHERE a.transaction_id = t.id)
+      ) parts GROUP BY bucket ORDER BY amount DESC
+    `, [...baseParams, ...baseParams])
+    const [accountRows] = await pool.execute(`
+      SELECT CASE WHEN t.kind = 'income'
+        THEN CASE WHEN da.owner_type = 'user' AND da.owner_user_id <> ? THEN 'บัญชีสมาชิก' ELSE COALESCE(da.name, t.source_account) END
+        ELSE CASE WHEN sa.owner_type = 'user' AND sa.owner_user_id <> ? THEN 'บัญชีสมาชิก' ELSE COALESCE(sa.name, t.source_account) END
+      END AS bucket, SUM(t.amount) AS amount FROM transactions t
+      LEFT JOIN money_accounts sa ON sa.id = t.source_account_id
+      LEFT JOIN money_accounts da ON da.id = t.destination_account_id
+      WHERE ${baseWhere} AND t.kind <> 'transfer'
+      GROUP BY bucket ORDER BY amount DESC
+    `, [user.id, user.id, ...baseParams])
+    const byCategory = new Map()
+    const expenseCategories = []
+    for (const row of categoryRows) {
+      const amount = Number(row.amount)
+      byCategory.set(row.bucket, (byCategory.get(row.bucket) || 0) + amount)
+      if (row.kind === 'expense') expenseCategories.push({ name: row.bucket, amount })
+    }
+    return send(response, 200, {
+      income: Number(totalsRows[0]?.income || 0), expense: Number(totalsRows[0]?.expense || 0),
+      categories: [...byCategory].map(([name, amount]) => ({ name, amount })).sort((a, b) => b.amount - a.amount),
+      expenseCategories,
+      owners: ownerRows.map((row) => ({ name: row.bucket, amount: Number(row.amount) })),
+      accounts: accountRows.map((row) => ({ name: row.bucket, amount: Number(row.amount) })),
+    })
+  }
+
+  if (method === 'GET' && pathname === '/api/transactions/page') {
+    const user = await currentUser(request)
+    if (!user) return send(response, 401, { error: 'กรุณาเข้าสู่ระบบ' })
+    const requestedScope = url.searchParams.get('scope')
+    if (!['family', 'personal'].includes(requestedScope)) return send(response, 400, { error: 'ขอบเขตข้อมูลไม่ถูกต้อง' })
+    const scope = requestedScope
+    const familyId = Number(url.searchParams.get('familyId')) || user.families[0]?.id || 0
+    if (scope === 'family' && !user.families.some((family) => family.id === familyId)) return send(response, 403, { error: 'คุณไม่มีสิทธิ์ดูข้อมูลครอบครัวนี้' })
+    const includeTrash = url.searchParams.get('trash') === 'true'
+    const page = Math.max(1, Math.min(1_000_000, Number.parseInt(url.searchParams.get('page') || '1', 10) || 1))
+    const pageSize = Math.max(1, Math.min(100, Number.parseInt(url.searchParams.get('pageSize') || '30', 10) || 30))
+    const search = String(url.searchParams.get('search') || '').trim().slice(0, 160)
+    const kind = url.searchParams.get('kind')
+    if (kind && !['income', 'expense', 'transfer'].includes(kind)) return send(response, 400, { error: 'ประเภทรายการไม่ถูกต้อง' })
+    const dateFrom = url.searchParams.get('dateFrom') || ''
+    const dateTo = url.searchParams.get('dateTo') || ''
+    if (dateFrom && !validDateKey(dateFrom) || dateTo && !validDateKey(dateTo) || dateFrom && dateTo && dateFrom > dateTo) return send(response, 400, { error: 'ช่วงวันที่ไม่ถูกต้อง' })
+    const where = [scope === 'family' ? `t.scope = 'family' AND t.family_id = ? AND EXISTS (SELECT 1 FROM family_members current_member WHERE current_member.family_id = t.family_id AND current_member.user_id = ? AND current_member.left_at IS NULL)` : `t.scope = 'personal' AND t.created_by_user_id = ?`]
+    const params = scope === 'family' ? [familyId, user.id] : [user.id]
+    if (includeTrash) {
+      where.push('t.deleted_at IS NOT NULL')
+      if (scope === 'family') {
+        where.push(`(t.created_by_user_id = ? OR EXISTS (SELECT 1 FROM family_members owner_membership WHERE owner_membership.family_id = t.family_id AND owner_membership.user_id = ? AND owner_membership.left_at IS NULL AND owner_membership.role = 'owner'))`)
+        params.push(user.id, user.id)
+      }
+    } else where.push('t.deleted_at IS NULL')
+    if (kind) { where.push('t.kind = ?'); params.push(kind) }
+    if (search) { where.push('t.title LIKE ?'); params.push(`%${search.replace(/[\\%_]/g, (match) => `\\${match}`)}%`) }
+    if (dateFrom) { where.push('t.occurred_at >= ?'); params.push(`${dateFrom} 00:00:00`) }
+    if (dateTo) { where.push('t.occurred_at < DATE_ADD(?, INTERVAL 1 DAY)'); params.push(`${dateTo} 00:00:00`) }
+    const whereSql = where.join(' AND ')
+    const [counts] = await pool.execute(`SELECT COUNT(*) AS total FROM transactions t WHERE ${whereSql}`, params)
+    const total = Number(counts[0]?.total || 0)
+    const [rows] = await pool.execute(`
+      SELECT t.id, t.title, COALESCE(c.name, t.category) AS category, t.category_id, t.kind, t.amount, t.scope, t.occurred_at,
+             CASE WHEN t.kind = 'income' THEN CASE WHEN da.owner_type = 'user' AND da.owner_user_id <> ? THEN 'บัญชีสมาชิก' ELSE COALESCE(da.name, t.source_account) END
+               ELSE CASE WHEN sa.owner_type = 'user' AND sa.owner_user_id <> ? THEN 'บัญชีสมาชิก' ELSE COALESCE(sa.name, t.source_account) END END AS source_account,
+             CASE WHEN da.owner_type = 'user' AND da.owner_user_id <> ? THEN 'บัญชีสมาชิก' ELSE COALESCE(da.name, t.destination_account) END AS destination_account,
+             t.source_account_id, t.destination_account_id, t.owner_name, t.payer_name,
+             (SELECT r.id FROM receipt_attachments r WHERE r.transaction_id = t.id AND r.deleted_at IS NULL ORDER BY r.id DESC LIMIT 1) AS receipt_id,
+             u.display_name AS recorder_name, t.icon
+      FROM transactions t
+      LEFT JOIN users u ON u.id = t.created_by_user_id
+      LEFT JOIN money_accounts sa ON sa.id = t.source_account_id
+      LEFT JOIN money_accounts da ON da.id = t.destination_account_id
+      LEFT JOIN transaction_categories c ON c.id = t.category_id
+      WHERE ${whereSql}
+      ORDER BY t.occurred_at DESC, t.id DESC
+      LIMIT ? OFFSET ?
+    `, [user.id, user.id, user.id, ...params, pageSize, (page - 1) * pageSize])
+    const mapped = rows.map(mapTransaction)
+    if (mapped.length) {
+      const ids = mapped.map((row) => row.id)
+      const [allocations] = await pool.query(`SELECT a.transaction_id, a.category_id, c.name AS category, a.owner_user_id, a.owner_is_family, u.display_name AS owner_name, a.amount FROM transaction_allocations a LEFT JOIN transaction_categories c ON c.id = a.category_id LEFT JOIN users u ON u.id = a.owner_user_id WHERE a.transaction_id IN (${ids.map(() => '?').join(',')}) ORDER BY a.id`, ids)
+      const byTransaction = new Map()
+      for (const allocation of allocations) {
+        const bucket = byTransaction.get(Number(allocation.transaction_id)) || []
+        bucket.push({ categoryId: allocation.category_id == null ? null : Number(allocation.category_id), category: allocation.category || null, ownerUserId: allocation.owner_user_id == null ? null : Number(allocation.owner_user_id), ownerName: allocation.owner_is_family ? 'ครอบครัว' : allocation.owner_name, amount: Number(allocation.amount) })
+        byTransaction.set(Number(allocation.transaction_id), bucket)
+      }
+      for (const row of mapped) row.allocations = byTransaction.get(row.id) || []
+    }
+    return send(response, 200, { rows: mapped, page, pageSize, total, totalPages: Math.ceil(total / pageSize) })
+  }
+
   if (method === 'GET' && pathname === '/api/transactions') {
     const user = await currentUser(request)
     if (!user) return send(response, 401, { error: 'กรุณาเข้าสู่ระบบ' })

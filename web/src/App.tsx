@@ -20,6 +20,9 @@ type Transaction = {
   receiptId?: number | null
   allocations?: { categoryId: number | null; category: string | null; ownerUserId: number | null; ownerName: string; amount: number }[]
 }
+type TransactionPageInfo = { page: number; pageSize: number; total: number; totalPages: number }
+type TransactionPageResult = { rows: Transaction[] } & TransactionPageInfo
+type ReportSummary = { income: number; expense: number; categories: { name: string; amount: number }[]; expenseCategories: { name: string; amount: number }[]; owners: { name: string; amount: number }[]; accounts: { name: string; amount: number }[] }
 type AuditHistory = { id: number; action: 'created' | 'updated' | 'trashed' | 'restored' | 'allocations_updated'; before: { title?: string; category?: string; amount?: string } | null; after: { title?: string; category?: string; amount?: string } | null; actor: string; createdAt: string }
 type MoneyAccount = { id: number; ownerType: 'user' | 'family'; ownerUserId: number | null; familyId: number | null; name: string; accountType: 'cash' | 'bank' | 'other'; openingBalance: number; openingDate: string; balance: number }
 type Category = { id: number; ownerType: 'user' | 'family'; ownerRef: number; kind: 'income' | 'expense'; name: string; icon: string; isDefault: boolean }
@@ -38,6 +41,9 @@ const monthStart = (date: string) => `${date.slice(0, 7)}-01`
 
 function App() {
   const [transactions, setTransactions] = useState<Transaction[]>([])
+  const [transactionPage, setTransactionPage] = useState(1)
+  const [transactionPageInfo, setTransactionPageInfo] = useState<TransactionPageInfo>({ page: 1, pageSize: 30, total: 0, totalPages: 0 })
+  const [reportSummary, setReportSummary] = useState<ReportSummary | null>(null)
   const [authUser, setAuthUser] = useState<AuthUser | null>(null)
   const [authChecked, setAuthChecked] = useState(false)
   const [authMessage, setAuthMessage] = useState('')
@@ -242,19 +248,51 @@ function App() {
   useEffect(() => {
     let active = true
     if (!authUser) { setTransactions([]); setApiStatus('offline'); return () => { active = false } }
+    const paginated = page === 'รายการทั้งหมด' || page === 'ถังขยะ' || page === 'ภาพรวม'
     const query = new URLSearchParams()
-    if (scope === 'family' && activeFamilyId) query.set('familyId', String(activeFamilyId))
-    if (page === 'ถังขยะ') query.set('trash', 'true')
+    if (paginated) {
+      query.set('scope', scope)
+      if (scope === 'family' && activeFamilyId) query.set('familyId', String(activeFamilyId))
+      query.set('dateFrom', dateFrom); query.set('dateTo', dateTo)
+      query.set('page', String(page === 'ภาพรวม' ? 1 : transactionPage)); query.set('pageSize', page === 'ภาพรวม' ? '5' : '30')
+      if (page === 'ถังขยะ') query.set('trash', 'true')
+      if (search.trim()) query.set('search', search.trim())
+      const kind = kindFilter === 'รายรับ' ? 'income' : kindFilter === 'รายจ่าย' ? 'expense' : kindFilter === 'โอน' ? 'transfer' : ''
+      if (kind) query.set('kind', kind)
+    } else { setTransactions([]); setTransactionPageInfo({ page: 1, pageSize: 30, total: 0, totalPages: 0 }); setApiStatus('connected'); return () => { active = false } }
     const queryText = query.toString()
-    fetch(`/api/transactions${queryText ? `?${queryText}` : ''}`)
+    fetch(paginated ? `/api/transactions/page?${queryText}` : `/api/transactions${queryText ? `?${queryText}` : ''}`)
       .then(async (response) => {
         if (!response.ok) throw new Error('โหลดรายการไม่สำเร็จ')
-        return response.json() as Promise<Transaction[]>
+        return response.json() as Promise<Transaction[] | TransactionPageResult>
       })
-      .then((rows) => { if (active) { setTransactions(rows); setApiStatus('connected') } })
+      .then((result) => { if (active) {
+        if (!Array.isArray(result)) { setTransactions(result.rows); if (page !== 'ภาพรวม') setTransactionPageInfo({ page: result.page, pageSize: result.pageSize, total: result.total, totalPages: result.totalPages }) }
+        setApiStatus('connected')
+      } })
       .catch(() => { if (active) setApiStatus('offline') })
     return () => { active = false }
-  }, [authUser, scope, activeFamilyId, page])
+  }, [authUser, scope, activeFamilyId, page, transactionPage, dateFrom, dateTo, search, kindFilter, financeVersion])
+
+  useEffect(() => { setTransactionPage(1) }, [scope, activeFamilyId, page, dateFrom, dateTo, search, kindFilter])
+
+  useEffect(() => {
+    let active = true
+    if (!authUser || !['ภาพรวม', 'รายงาน'].includes(page)) { setReportSummary(null); return () => { active = false } }
+    const query = new URLSearchParams({ scope, dateFrom, dateTo })
+    if (scope === 'family' && activeFamilyId) query.set('familyId', String(activeFamilyId))
+    const kind = kindFilter === 'รายรับ' ? 'income' : kindFilter === 'รายจ่าย' ? 'expense' : kindFilter === 'โอน' ? 'transfer' : ''
+    if (kind) query.set('kind', kind)
+    if (search.trim()) query.set('search', search.trim())
+    fetch(`/api/transactions/summary?${query}`)
+      .then(async (response) => {
+        if (!response.ok) throw new Error('โหลดสรุปรายการไม่สำเร็จ')
+        return response.json() as Promise<ReportSummary>
+      })
+      .then((summary) => { if (active) { setReportSummary(summary); setApiStatus('connected') } })
+      .catch(() => { if (active) setReportSummary(null) })
+    return () => { active = false }
+  }, [authUser, scope, activeFamilyId, page, dateFrom, dateTo, kindFilter, search, financeVersion])
 
   const rangeRows = useMemo(() => transactions.filter((item) => {
     const date = item.occurredAt.slice(0, 10)
@@ -268,28 +306,35 @@ function App() {
   }), [rangeRows, scope, kindFilter, search])
 
   const totals = useMemo(() => {
-    const visible = rangeRows.filter((item) => item.scope === scope)
-    const income = visible.filter((item) => item.kind === 'income').reduce((sum, item) => sum + item.amount, 0)
-    const expense = visible.filter((item) => item.kind === 'expense').reduce((sum, item) => sum + item.amount, 0)
+    const income = reportSummary?.income || 0
+    const expense = reportSummary?.expense || 0
     return { income, expense, net: income - expense }
-  }, [rangeRows, scope])
+  }, [reportSummary])
 
   const categoryTotals = useMemo(() => {
-    const totals = new Map<string, number>()
-    for (const item of rangeRows) {
-      if (item.scope !== scope || item.kind !== 'expense') continue
-      const parts = item.allocations?.length
-        ? item.allocations.map((allocation) => ({ category: allocation.category || item.category, amount: allocation.amount }))
-        : [{ category: item.category, amount: item.amount }]
-      for (const part of parts) totals.set(part.category, (totals.get(part.category) || 0) + part.amount)
-    }
-    return [...totals].sort((a, b) => b[1] - a[1]).slice(0, 5)
-  }, [rangeRows, scope])
+    return (reportSummary?.expenseCategories || []).slice(0, 5).map((item) => [item.name, item.amount] as [string, number])
+  }, [reportSummary])
   const budgetAlerts = budgets.filter((budget) => budget.spent >= budget.amount * budget.alertPercent / 100)
 
-  function exportReport() {
+  async function exportReport() {
+    const exported: Transaction[] = []
+    let page = 1
+    let totalPages = 1
+    const kind = kindFilter === 'รายรับ' ? 'income' : kindFilter === 'รายจ่าย' ? 'expense' : kindFilter === 'โอน' ? 'transfer' : ''
+    try {
+      while (page <= totalPages) {
+        const query = new URLSearchParams({ scope, dateFrom, dateTo, page: String(page), pageSize: '100' })
+        if (scope === 'family' && activeFamilyId) query.set('familyId', String(activeFamilyId))
+        if (kind) query.set('kind', kind)
+        if (search.trim()) query.set('search', search.trim())
+        const response = await fetch(`/api/transactions/page?${query}`)
+        if (!response.ok) throw new Error('โหลดรายการเพื่อส่งออกไม่สำเร็จ')
+        const result = await response.json() as TransactionPageResult
+        exported.push(...result.rows); totalPages = result.totalPages; page += 1
+      }
+    } catch (error) { notify(error instanceof Error ? error.message : 'ส่งออกรายงานไม่สำเร็จ'); return }
     const escape = (value: string) => `"${value.replaceAll('"', '""')}"`
-    const lines = [['วันที่', 'รายการ', 'ประเภท', 'หมวดหมู่', 'ขอบเขต', 'บัญชี', 'ผู้จ่าย', 'เจ้าของรายการ', 'จำนวนเงิน'], ...filtered.map((item) => [item.occurredAt.slice(0, 10), item.title, item.kind === 'income' ? 'รายรับ' : item.kind === 'expense' ? 'รายจ่าย' : 'โอน', item.category, item.scope === 'family' ? 'ครอบครัว' : 'ส่วนตัว', item.account, item.payer || '', item.owner, String(item.amount)])]
+    const lines = [['วันที่', 'รายการ', 'ประเภท', 'หมวดหมู่', 'ขอบเขต', 'บัญชี', 'ผู้จ่าย', 'เจ้าของรายการ', 'จำนวนเงิน'], ...exported.map((item) => [item.occurredAt.slice(0, 10), item.title, item.kind === 'income' ? 'รายรับ' : item.kind === 'expense' ? 'รายจ่าย' : 'โอน', item.category, item.scope === 'family' ? 'ครอบครัว' : 'ส่วนตัว', item.account, item.payer || '', item.owner, String(item.amount)])]
     const csv = `\uFEFF${lines.map((line) => line.map(escape).join(',')).join('\r\n')}`
     const blobUrl = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }))
     const link = document.createElement('a'); link.href = blobUrl; link.download = `ounjai-${dateFrom}-${dateTo}.csv`; link.click(); window.setTimeout(() => URL.revokeObjectURL(blobUrl), 1000)
@@ -417,7 +462,7 @@ function App() {
         if (!receiptAttached) notify('บันทึกรายการแล้ว แต่แนบภาพไม่สำเร็จ')
       }
       setTransactions((items) => editingTransactionId ? items.map((item) => item.id === saved.id ? saved : item) : [saved, ...items])
-      setApiStatus('connected'); await closeComposer(receiptAttached); setEditingTransactionId(null); setClientRequestId(crypto.randomUUID()); notify(editingTransactionId ? 'แก้ไขรายการแล้ว' : 'บันทึกลง MySQL แล้ว')
+      setApiStatus('connected'); setFinanceVersion((value) => value + 1); await closeComposer(receiptAttached); setEditingTransactionId(null); setClientRequestId(crypto.randomUUID()); notify(editingTransactionId ? 'แก้ไขรายการแล้ว' : 'บันทึกลง MySQL แล้ว')
     } catch (error) {
       setApiStatus('offline')
       notify(error instanceof Error ? error.message : 'เชื่อมต่อฐานข้อมูลไม่สำเร็จ')
@@ -429,14 +474,14 @@ function App() {
     const response = await fetch(`/api/transactions/${item.id}`, { method: 'DELETE', headers: { 'content-type': 'application/json' }, body: '{}' })
     const result = await response.json() as { error?: string }
     if (!response.ok) return notify(result.error || 'ย้ายรายการไปถังขยะไม่สำเร็จ')
-    setTransactions((items) => items.filter((current) => current.id !== item.id)); notify('ย้ายรายการไปถังขยะแล้ว')
+    setTransactions((items) => items.filter((current) => current.id !== item.id)); setFinanceVersion((value) => value + 1); notify('ย้ายรายการไปถังขยะแล้ว')
   }
 
   async function restoreTransaction(item: Transaction) {
     const response = await fetch(`/api/transactions/${item.id}/restore`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })
     const result = await response.json() as { transaction?: Transaction; error?: string }
     if (!response.ok) return notify(result.error || 'กู้คืนรายการไม่สำเร็จ')
-    setTransactions((items) => items.filter((current) => current.id !== item.id)); notify('กู้คืนรายการแล้ว')
+    setTransactions((items) => items.filter((current) => current.id !== item.id)); setFinanceVersion((value) => value + 1); notify('กู้คืนรายการแล้ว')
   }
 
   async function deleteReceipt(item: Transaction) {
@@ -651,7 +696,7 @@ function App() {
     const response = await fetch(`/api/transactions/${splitTransaction.id}/allocations`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ allocations }) })
     const result = await response.json() as { error?: string }
     if (!response.ok) return notify(result.error || 'บันทึกส่วนแบ่งไม่สำเร็จ')
-    setSplitTransaction(null); setSplitRows([]); notify('บันทึกส่วนแบ่งรายการแล้ว')
+    setSplitTransaction(null); setSplitRows([]); setFinanceVersion((value) => value + 1); notify('บันทึกส่วนแบ่งรายการแล้ว')
   }
 
   function splitEvenly() {
@@ -796,7 +841,7 @@ function App() {
             </section>
           </>}
 
-          {page !== 'ภาพรวม' && <PageContent page={page} rows={filtered} search={search} familyInfo={familyInfo} activeFamilyId={activeFamilyId} inviteLink={inviteLink} onCreateInvitation={createInvitation} onRevokeInvitation={revokeInvitation} onLeaveFamily={leaveFamily} onCloseInvite={() => setInviteLink('')} onSearch={setSearch} kindFilter={kindFilter} onKindFilter={setKindFilter} onAdd={() => openComposer(page === 'รายการทั้งหมด' ? 'expense' : 'income')} onEdit={editTransaction} onTrash={trashTransaction} onRestore={restoreTransaction} onHistory={viewHistory} onSplit={openSplitEditor} onDeleteReceipt={deleteReceipt} onToast={notify} scope={scope} moneyAccounts={moneyAccounts.filter((account) => scope === 'family' ? account.ownerType === 'family' && account.familyId === activeFamilyId : account.ownerType === 'user' && account.ownerUserId === authUser.id)} categories={categoryItems.filter((category) => category.ownerType === (scope === 'family' ? 'family' : 'user') && category.ownerRef === (scope === 'family' ? activeFamilyId : authUser.id))} budgets={budgets} budgetMovements={budgetMovements} onCreateBudget={createBudget} onMoveBudget={moveBudget} onManageBudget={manageBudget} onCreateAccount={() => setAccountDialog(true)} onEditAccount={editMoneyAccount} onArchiveAccount={archiveMoneyAccount} onCreateCategory={createCategory} onEditCategory={editCategory} onArchiveCategory={archiveCategory} canManageFamilyFinancials={familyInfo.find((family) => family.id === activeFamilyId)?.role === 'owner'} recurringRules={recurringRules} recurringReviews={recurringReviews} onCreateRecurringRule={createRecurringRule} onToggleRecurringRule={toggleRecurringRule} onReviewRecurring={reviewRecurring} onEditAndReviewRecurring={editAndReviewRecurring} />}
+          {page !== 'ภาพรวม' && <PageContent page={page} rows={filtered} reportSummary={reportSummary} transactionPageInfo={transactionPageInfo} onTransactionPageChange={setTransactionPage} search={search} familyInfo={familyInfo} activeFamilyId={activeFamilyId} inviteLink={inviteLink} onCreateInvitation={createInvitation} onRevokeInvitation={revokeInvitation} onLeaveFamily={leaveFamily} onCloseInvite={() => setInviteLink('')} onSearch={setSearch} kindFilter={kindFilter} onKindFilter={setKindFilter} onAdd={() => openComposer(page === 'รายการทั้งหมด' ? 'expense' : 'income')} onEdit={editTransaction} onTrash={trashTransaction} onRestore={restoreTransaction} onHistory={viewHistory} onSplit={openSplitEditor} onDeleteReceipt={deleteReceipt} onToast={notify} scope={scope} moneyAccounts={moneyAccounts.filter((account) => scope === 'family' ? account.ownerType === 'family' && account.familyId === activeFamilyId : account.ownerType === 'user' && account.ownerUserId === authUser.id)} categories={categoryItems.filter((category) => category.ownerType === (scope === 'family' ? 'family' : 'user') && category.ownerRef === (scope === 'family' ? activeFamilyId : authUser.id))} budgets={budgets} budgetMovements={budgetMovements} onCreateBudget={createBudget} onMoveBudget={moveBudget} onManageBudget={manageBudget} onCreateAccount={() => setAccountDialog(true)} onEditAccount={editMoneyAccount} onArchiveAccount={archiveMoneyAccount} onCreateCategory={createCategory} onEditCategory={editCategory} onArchiveCategory={archiveCategory} canManageFamilyFinancials={familyInfo.find((family) => family.id === activeFamilyId)?.role === 'owner'} recurringRules={recurringRules} recurringReviews={recurringReviews} onCreateRecurringRule={createRecurringRule} onToggleRecurringRule={toggleRecurringRule} onReviewRecurring={reviewRecurring} onEditAndReviewRecurring={editAndReviewRecurring} />}
         </div>
       </main>
 
@@ -876,14 +921,24 @@ function AccountRow({ icon, title, owner, amount, tone }: { icon: ReactNode; tit
   return <div className="account-row"><div className={`account-icon ${tone}`}>{icon}</div><div className="account-copy"><strong>{title}</strong><span>{owner}</span></div><div className="account-amount"><strong>฿{amount}</strong><span>ยอดคงเหลือ</span></div></div>
 }
 
-function PageContent({ page, rows, search, familyInfo, activeFamilyId, inviteLink, onCreateInvitation, onRevokeInvitation, onLeaveFamily, onCloseInvite, onSearch, kindFilter, onKindFilter, onAdd, onEdit, onTrash, onRestore, onHistory, onSplit, onDeleteReceipt, onToast, scope, moneyAccounts, categories, budgets, budgetMovements, onCreateBudget, onMoveBudget, onManageBudget, onCreateAccount, onEditAccount, onArchiveAccount, onCreateCategory, onEditCategory, onArchiveCategory, canManageFamilyFinancials, recurringRules, recurringReviews, onCreateRecurringRule, onToggleRecurringRule, onReviewRecurring, onEditAndReviewRecurring }: { page: string; rows: Transaction[]; search: string; familyInfo: FamilyInfo[]; activeFamilyId: number | null; inviteLink: string; onCreateInvitation: (familyId: number) => void; onRevokeInvitation: (familyId: number, invitationId: number) => void; onLeaveFamily: (familyId: number) => void; onCloseInvite: () => void; onSearch: (value: string) => void; kindFilter: string; onKindFilter: (value: string) => void; onAdd: () => void; onEdit: (item: Transaction) => void; onTrash: (item: Transaction) => void; onRestore: (item: Transaction) => void; onHistory: (item: Transaction) => void; onSplit: (item: Transaction) => void; onDeleteReceipt: (item: Transaction) => void; onToast: (message: string) => void; scope: Scope; moneyAccounts: MoneyAccount[]; categories: Category[]; budgets: Budget[]; budgetMovements: BudgetMovement[]; onCreateBudget: () => void; onMoveBudget: () => void; onManageBudget: (budget: Budget) => void; onCreateAccount: () => void; onEditAccount: (account: MoneyAccount) => void; onArchiveAccount: (account: MoneyAccount) => void; onCreateCategory: (kind: 'income' | 'expense', name: string) => void; onEditCategory: (category: Category) => void; onArchiveCategory: (category: Category) => void; canManageFamilyFinancials: boolean; recurringRules: RecurringRule[]; recurringReviews: RecurringReview[]; onCreateRecurringRule: () => void; onToggleRecurringRule: (rule: RecurringRule) => void; onReviewRecurring: (review: RecurringReview, action: 'confirm' | 'dismiss', edits?: { title: string; amount: number; occurredAt: string }) => void; onEditAndReviewRecurring: (review: RecurringReview) => void }) {
-  if (page === 'ถังขยะ') return <div className="panel full-page-panel"><div className="panel-header"><div><div className="panel-title">ถังขยะ</div><div className="panel-subtitle">รายการที่ลบจะไม่รวมในสรุป และกู้คืนได้</div></div></div><TransactionTable rows={rows} onRestore={onRestore} onDeleteReceipt={onDeleteReceipt}/></div>
-  if (page === 'รายการทั้งหมด') return <div className="panel full-page-panel"><div className="list-toolbar"><div className="search-field"><Search size={16}/><input value={search} onChange={(event) => onSearch(event.target.value)} placeholder="ค้นหารายการ"/></div><select className="filter-select" value={kindFilter} onChange={(event) => onKindFilter(event.target.value)} aria-label="กรองประเภทรายการ"><option>ทั้งหมด</option><option>รายรับ</option><option>รายจ่าย</option><option>โอน</option></select><button className="primary-button" onClick={onAdd}><Plus size={16}/> เพิ่มรายการ</button></div><TransactionTable rows={rows} onEdit={onEdit} onTrash={onTrash} onHistory={onHistory} onDeleteReceipt={onDeleteReceipt} onSplit={onSplit}/></div>
+function TransactionPagination({ info, onPageChange }: { info: TransactionPageInfo; onPageChange: (page: number) => void }) {
+  if (!info.totalPages) return null
+  const first = (info.page - 1) * info.pageSize + 1
+  const last = Math.min(info.page * info.pageSize, info.total)
+  return <nav className="transaction-pagination" aria-label="แบ่งหน้ารายการ"><span>แสดง {first}–{last} จาก {info.total}</span><div><button type="button" className="secondary-button" disabled={info.page <= 1} onClick={() => onPageChange(info.page - 1)}>ก่อนหน้า</button><span>หน้า {info.page} / {info.totalPages}</span><button type="button" className="secondary-button" disabled={info.page >= info.totalPages} onClick={() => onPageChange(info.page + 1)}>ถัดไป</button></div></nav>
+}
+
+function PageContent({ page, rows, reportSummary, transactionPageInfo, onTransactionPageChange, search, familyInfo, activeFamilyId, inviteLink, onCreateInvitation, onRevokeInvitation, onLeaveFamily, onCloseInvite, onSearch, kindFilter, onKindFilter, onAdd, onEdit, onTrash, onRestore, onHistory, onSplit, onDeleteReceipt, onToast, scope, moneyAccounts, categories, budgets, budgetMovements, onCreateBudget, onMoveBudget, onManageBudget, onCreateAccount, onEditAccount, onArchiveAccount, onCreateCategory, onEditCategory, onArchiveCategory, canManageFamilyFinancials, recurringRules, recurringReviews, onCreateRecurringRule, onToggleRecurringRule, onReviewRecurring, onEditAndReviewRecurring }: { page: string; rows: Transaction[]; reportSummary: ReportSummary | null; transactionPageInfo: TransactionPageInfo; onTransactionPageChange: (page: number) => void; search: string; familyInfo: FamilyInfo[]; activeFamilyId: number | null; inviteLink: string; onCreateInvitation: (familyId: number) => void; onRevokeInvitation: (familyId: number, invitationId: number) => void; onLeaveFamily: (familyId: number) => void; onCloseInvite: () => void; onSearch: (value: string) => void; kindFilter: string; onKindFilter: (value: string) => void; onAdd: () => void; onEdit: (item: Transaction) => void; onTrash: (item: Transaction) => void; onRestore: (item: Transaction) => void; onHistory: (item: Transaction) => void; onSplit: (item: Transaction) => void; onDeleteReceipt: (item: Transaction) => void; onToast: (message: string) => void; scope: Scope; moneyAccounts: MoneyAccount[]; categories: Category[]; budgets: Budget[]; budgetMovements: BudgetMovement[]; onCreateBudget: () => void; onMoveBudget: () => void; onManageBudget: (budget: Budget) => void; onCreateAccount: () => void; onEditAccount: (account: MoneyAccount) => void; onArchiveAccount: (account: MoneyAccount) => void; onCreateCategory: (kind: 'income' | 'expense', name: string) => void; onEditCategory: (category: Category) => void; onArchiveCategory: (category: Category) => void; canManageFamilyFinancials: boolean; recurringRules: RecurringRule[]; recurringReviews: RecurringReview[]; onCreateRecurringRule: () => void; onToggleRecurringRule: (rule: RecurringRule) => void; onReviewRecurring: (review: RecurringReview, action: 'confirm' | 'dismiss', edits?: { title: string; amount: number; occurredAt: string }) => void; onEditAndReviewRecurring: (review: RecurringReview) => void }) {
+  if (page === 'ถังขยะ') return <div className="panel full-page-panel"><div className="panel-header"><div><div className="panel-title">ถังขยะ</div><div className="panel-subtitle">รายการที่ลบจะไม่รวมในสรุป และกู้คืนได้ · {transactionPageInfo.total} รายการ</div></div></div><TransactionTable rows={rows} onRestore={onRestore} onDeleteReceipt={onDeleteReceipt}/><TransactionPagination info={transactionPageInfo} onPageChange={onTransactionPageChange}/></div>
+  if (page === 'รายการทั้งหมด') return <div className="panel full-page-panel"><div className="list-toolbar"><div className="search-field"><Search size={16}/><input value={search} onChange={(event) => onSearch(event.target.value)} placeholder="ค้นหารายการ"/></div><select className="filter-select" value={kindFilter} onChange={(event) => onKindFilter(event.target.value)} aria-label="กรองประเภทรายการ"><option>ทั้งหมด</option><option>รายรับ</option><option>รายจ่าย</option><option>โอน</option></select><button className="primary-button" onClick={onAdd}><Plus size={16}/> เพิ่มรายการ</button></div><TransactionTable rows={rows} onEdit={onEdit} onTrash={onTrash} onHistory={onHistory} onDeleteReceipt={onDeleteReceipt} onSplit={onSplit}/><TransactionPagination info={transactionPageInfo} onPageChange={onTransactionPageChange}/></div>
   if (page === 'รายงาน') {
-    const income = rows.filter((item) => item.kind === 'income').reduce((sum, item) => sum + item.amount, 0)
-    const expense = rows.filter((item) => item.kind === 'expense').reduce((sum, item) => sum + item.amount, 0)
-    const group = (key: (item: Transaction) => string) => { const totals = new Map<string, number>(); rows.filter((item) => item.kind !== 'transfer').forEach((item) => { const parts = item.allocations?.length ? item.allocations.map((allocation) => ({ ...item, category: allocation.category || item.category, owner: allocation.ownerName, amount: allocation.amount })) : [item]; parts.forEach((part) => totals.set(key(part), (totals.get(key(part)) || 0) + part.amount)) }); return [...totals].sort((a, b) => b[1] - a[1]) }
-    return <div className="page-cards"><div className="summary-grid"><SummaryCard label="รายรับ" amount={income} detail="ตามช่วงวันที่ที่เลือก" trend="รวม" tone="green" icon={<ArrowDownLeft size={18}/>} spark="M2 27 C16 23 15 12 27 17 S39 10 48 13 S60 3 73 8"/><SummaryCard label="รายจ่าย" amount={expense} detail="ตามช่วงวันที่ที่เลือก" trend="รวม" tone="orange" icon={<ArrowUpRight size={18}/>} spark="M2 23 C14 26 17 12 29 18 S43 5 53 12 S64 8 73 3"/><SummaryCard label="เงินสุทธิ" amount={income-expense} detail="ไม่นับรายการโอน" trend="สุทธิ" tone="blue" icon={<Wallet size={18}/>} spark="M2 25 C12 22 16 19 26 20 S39 9 49 13 S63 5 73 4"/></div><div className="panel"><div className="panel-header"><div><div className="panel-title">แยกตามหมวดหมู่</div><div className="panel-subtitle">รายรับและรายจ่ายในขอบเขตนี้</div></div></div>{group((item) => item.category).map(([name, amount]) => <BudgetRow key={name} icon={categories.find((category) => category.name === name)?.icon || '🧾'} name={name} used={amount} limit={Math.max(amount, 1)} color="teal"/>)}{!rows.length && <div className="empty-state">ไม่มีรายการในช่วงวันที่นี้</div>}</div><div className="panel"><div className="panel-header"><div><div className="panel-title">แยกตามเจ้าของรายการ</div><div className="panel-subtitle">ไม่รวมรายการโอน</div></div></div>{group((item) => item.owner).map(([name, amount]) => <BudgetRow key={name} icon="👤" name={name} used={amount} limit={Math.max(amount, 1)} color="blue"/>)}{!rows.length && <div className="empty-state">ไม่มีรายการในช่วงวันที่นี้</div>}</div><div className="panel"><div className="panel-header"><div><div className="panel-title">แยกตามบัญชีเงิน</div><div className="panel-subtitle">ยอดรายรับและรายจ่ายของบัญชีตามช่วงวันที่</div></div></div>{group((item) => item.account.split(' → ')[0]).map(([name, amount]) => <BudgetRow key={name} icon="🏦" name={name} used={amount} limit={Math.max(amount, 1)} color="purple"/>)}{!rows.length && <div className="empty-state">ไม่มีรายการในช่วงวันที่นี้</div>}</div></div>
+    const income = reportSummary?.income || 0
+    const expense = reportSummary?.expense || 0
+    const categoryGroups = reportSummary?.categories || []
+    const owners = reportSummary?.owners || []
+    const accounts = reportSummary?.accounts || []
+    const empty = <div className="empty-state">ไม่มีรายการในช่วงวันที่นี้</div>
+    return <div className="page-cards"><div className="summary-grid"><SummaryCard label="รายรับ" amount={income} detail="ตามช่วงวันที่ที่เลือก" trend="รวม" tone="green" icon={<ArrowDownLeft size={18}/>} spark="M2 27 C16 23 15 12 27 17 S39 10 48 13 S60 3 73 8"/><SummaryCard label="รายจ่าย" amount={expense} detail="ตามช่วงวันที่ที่เลือก" trend="รวม" tone="orange" icon={<ArrowUpRight size={18}/>} spark="M2 23 C14 26 17 12 29 18 S43 5 53 12 S64 8 73 3"/><SummaryCard label="เงินสุทธิ" amount={income-expense} detail="ไม่นับรายการโอน" trend="สุทธิ" tone="blue" icon={<Wallet size={18}/>} spark="M2 25 C12 22 16 19 26 20 S39 9 49 13 S63 5 73 4"/></div><div className="panel"><div className="panel-header"><div><div className="panel-title">แยกตามหมวดหมู่</div><div className="panel-subtitle">รายรับและรายจ่ายในขอบเขตนี้</div></div></div>{categoryGroups.length ? categoryGroups.map((item) => <BudgetRow key={item.name} icon={categories.find((category) => category.name === item.name)?.icon || '🧾'} name={item.name} used={item.amount} limit={Math.max(item.amount, 1)} color="teal"/>) : empty}</div><div className="panel"><div className="panel-header"><div><div className="panel-title">แยกตามเจ้าของรายการ</div><div className="panel-subtitle">ไม่รวมรายการโอน</div></div></div>{owners.length ? owners.map((item) => <BudgetRow key={item.name} icon="👤" name={item.name} used={item.amount} limit={Math.max(item.amount, 1)} color="blue"/>) : empty}</div><div className="panel"><div className="panel-header"><div><div className="panel-title">แยกตามบัญชีเงิน</div><div className="panel-subtitle">ยอดรายรับและรายจ่ายของบัญชีตามช่วงวันที่</div></div></div>{accounts.length ? accounts.map((item) => <BudgetRow key={item.name} icon="🏦" name={item.name} used={item.amount} limit={Math.max(item.amount, 1)} color="purple"/>) : empty}</div></div>
   }
   if (page === 'งบประมาณ') return <div className="page-cards"><div className="panel full-page-panel"><div className="panel-header"><div><div className="panel-title">งบ{scope === 'family' ? 'ครอบครัว' : 'ส่วนตัว'}</div><div className="panel-subtitle">ยอดใช้ {formatMoney(budgets.reduce((sum, budget) => sum + budget.spent, 0))} / วงเงิน {formatMoney(budgets.reduce((sum, budget) => sum + budget.amount, 0))} บาท · รอบคำนวณปัจจุบัน</div></div><div className="heading-actions">{budgets.length > 1 && (scope === 'personal' || canManageFamilyFinancials) && <button className="secondary-button" onClick={onMoveBudget}>ย้ายงบ</button>}{(scope === 'personal' || canManageFamilyFinancials) && <button className="primary-button" onClick={onCreateBudget}><Plus size={16}/> เพิ่มงบ</button>}</div></div>{budgets.length ? budgets.map((budget) => <div className="budget-live-row" key={budget.id}><BudgetRow icon={budget.icon} name={budget.category} used={budget.spent} limit={budget.amount} color={budget.spent >= budget.amount ? 'orange' : 'teal'}/><div className="budget-live-meta"><span>แจ้งเตือนเมื่อใช้ {budget.alertPercent}% · {budget.periodType === 'monthly' ? `รอบเริ่มวันที่ ${budget.cycleStartDay}` : `${budget.periodStart} ถึง ${budget.periodEnd}`}</span>{budget.spent >= budget.amount * budget.alertPercent / 100 && <strong className="budget-alert">{budget.spent > budget.amount ? 'เกินงบแล้ว' : 'ใกล้ถึงงบ'}</strong>}{(scope === 'personal' || canManageFamilyFinancials) && <button className="secondary-button" onClick={() => onManageBudget(budget)}>จัดการ</button>}</div></div>) : <div className="empty-state">ยังไม่มีงบในขอบเขตนี้</div>}</div>{budgetMovements.length > 0 && <div className="panel full-page-panel"><div className="panel-header"><div><div className="panel-title">ประวัติย้ายงบ</div><div className="panel-subtitle">ไม่เปลี่ยนยอดเงินจริง · แสดง 100 รายการล่าสุด</div></div></div>{budgetMovements.map((movement) => <div className="recurring-review-row" key={movement.id}><div className="recurring-copy"><strong>{movement.fromCategory} → {movement.toCategory} · ฿{formatMoney(movement.amount)}</strong><span>{movement.movedBy} · {new Date(movement.createdAt).toLocaleString('th-TH')}{movement.note ? ` · ${movement.note}` : ''}</span></div></div>)}</div>}</div>
   if (page === 'รายการประจำ') return <div className="page-cards recurring-page"><div className="panel full-page-panel"><div className="panel-header"><div><div className="panel-title">รายการรอตรวจ</div><div className="panel-subtitle">ยืนยันแล้วจึงกระทบยอดบัญชีเงิน · {recurringReviews.length} รายการรอการยืนยัน</div></div><button className="primary-button" onClick={onCreateRecurringRule}><Plus size={16}/> ตั้งรายการประจำ</button></div>{recurringReviews.map((review) => <article className="recurring-review-row" key={review.id}><div className={`transaction-icon ${review.transaction.kind}`}>{review.transaction.kind === 'income' ? '↙' : review.transaction.kind === 'transfer' ? '↗' : '↖'}</div><div className="recurring-copy"><strong>{review.transaction.title}</strong><span>{review.reviewDate} · {review.transaction.kind === 'income' ? 'รายรับ' : review.transaction.kind === 'transfer' ? 'โอน' : 'รายจ่าย'} · {review.createdBy}</span></div><strong className={`transaction-amount ${review.transaction.kind}`}>฿{formatMoney(review.transaction.amount)}</strong>{review.canManage && <div className="recurring-actions"><button className="secondary-button" onClick={() => onReviewRecurring(review, 'dismiss')}>ไม่บันทึกรอบนี้</button><button className="secondary-button" onClick={() => onEditAndReviewRecurring(review)}>แก้ก่อนยืนยัน</button><button className="primary-button" onClick={() => onReviewRecurring(review, 'confirm')}><Check size={15}/> ยืนยัน</button></div>}</article>)}{!recurringReviews.length && <div className="empty-state">ไม่มีรายการประจำที่รอตรวจในขอบเขตนี้</div>}</div><div className="panel full-page-panel"><div className="panel-header"><div><div className="panel-title">กติกาประจำ</div><div className="panel-subtitle">แต่ละรอบจะสร้างรายการรอตรวจเมื่อเปิดแอป</div></div></div>{recurringRules.map((rule) => <article className="recurring-review-row" key={rule.id}><div className={`transaction-icon ${rule.kind}`}>{rule.kind === 'income' ? '↙' : rule.kind === 'transfer' ? '↗' : '↖'}</div><div className="recurring-copy"><strong>{rule.title} · ฿{formatMoney(rule.amount)}</strong><span>{rule.frequency === 'weekly' ? 'ทุกสัปดาห์' : rule.frequency === 'monthly' ? `ทุกเดือน วันที่ ${rule.dayOfMonth || 'ตามวันที่เริ่ม'}` : 'ทุกปี'} · {rule.paused ? 'หยุดชั่วคราว' : 'ทำงานอยู่'} · บันทึกโดย {rule.createdBy}</span></div>{rule.canManage && <button className="secondary-button" onClick={() => onToggleRecurringRule(rule)}>{rule.paused ? 'เปิดใช้งาน' : 'หยุดชั่วคราว'}</button>}</article>)}{!recurringRules.length && <div className="empty-state">ยังไม่มีกติกาประจำ</div>}</div></div>

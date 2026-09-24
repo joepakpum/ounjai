@@ -341,16 +341,25 @@ async function mapTransactionForUser(connection, row, user) {
   const destinationId = row.destination_account_id
   let sourceName = row.source_account
   let destinationName = row.destination_account
+  let sourceAccountId = row.source_account_id
+  let destinationAccountId = row.destination_account_id
   const accountIds = [...new Set([sourceId, destinationId].filter(Boolean))]
   if (accountIds.length) {
     const [accounts] = await connection.query(`SELECT id, owner_type, owner_user_id FROM money_accounts WHERE id IN (${accountIds.map(() => '?').join(',')})`, accountIds)
     const accountByKey = new Map(accounts.map((account) => [Number(account.id), account]))
     const source = sourceId ? accountByKey.get(Number(sourceId)) : null
     const destination = destinationId ? accountByKey.get(Number(destinationId)) : null
-    if (source?.owner_type === 'user' && Number(source.owner_user_id) !== user.id) sourceName = 'บัญชีสมาชิก'
-    if (destination?.owner_type === 'user' && Number(destination.owner_user_id) !== user.id) destinationName = 'บัญชีสมาชิก'
+    if (source?.owner_type === 'user' && Number(source.owner_user_id) !== user.id) {
+      sourceName = 'บัญชีสมาชิก'
+      if (row.kind === 'income') destinationAccountId = null
+      else sourceAccountId = null
+    }
+    if (destination?.owner_type === 'user' && Number(destination.owner_user_id) !== user.id) {
+      destinationName = 'บัญชีสมาชิก'
+      destinationAccountId = null
+    }
   }
-  return mapTransaction({ ...row, source_account: sourceName, destination_account: destinationName })
+  return mapTransaction({ ...row, source_account: sourceName, destination_account: destinationName, source_account_id: sourceAccountId, destination_account_id: destinationAccountId })
 }
 
 function canManageTransaction(user, row) {
@@ -1464,7 +1473,9 @@ async function handle(request, response) {
              CASE WHEN t.kind = 'income' THEN CASE WHEN da.owner_type = 'user' AND da.owner_user_id <> ? THEN 'บัญชีสมาชิก' ELSE COALESCE(da.name, t.source_account) END
                ELSE CASE WHEN sa.owner_type = 'user' AND sa.owner_user_id <> ? THEN 'บัญชีสมาชิก' ELSE COALESCE(sa.name, t.source_account) END END AS source_account,
              CASE WHEN da.owner_type = 'user' AND da.owner_user_id <> ? THEN 'บัญชีสมาชิก' ELSE COALESCE(da.name, t.destination_account) END AS destination_account,
-             t.source_account_id, t.destination_account_id, t.owner_name, t.payer_name,
+             CASE WHEN t.scope = 'family' AND sa.owner_type = 'user' AND sa.owner_user_id <> ? THEN NULL ELSE t.source_account_id END AS source_account_id,
+             CASE WHEN t.scope = 'family' AND da.owner_type = 'user' AND da.owner_user_id <> ? THEN NULL ELSE t.destination_account_id END AS destination_account_id,
+             t.owner_name, t.payer_name,
              (SELECT r.id FROM receipt_attachments r WHERE r.transaction_id = t.id AND r.deleted_at IS NULL ORDER BY r.id DESC LIMIT 1) AS receipt_id,
              u.display_name AS recorder_name, t.icon
       FROM transactions t
@@ -1475,7 +1486,7 @@ async function handle(request, response) {
       WHERE ${whereSql}
       ORDER BY t.occurred_at DESC, t.id DESC
       LIMIT ? OFFSET ?
-    `, [user.id, user.id, user.id, ...params, pageSize, (page - 1) * pageSize])
+    `, [user.id, user.id, user.id, user.id, user.id, ...params, pageSize, (page - 1) * pageSize])
     const mapped = rows.map(mapTransaction)
     if (mapped.length) {
       const ids = mapped.map((row) => row.id)
@@ -1502,7 +1513,9 @@ async function handle(request, response) {
              CASE WHEN t.kind = 'income' THEN CASE WHEN da.owner_type = 'user' AND da.owner_user_id <> ? THEN 'บัญชีสมาชิก' ELSE COALESCE(da.name, t.source_account) END
                ELSE CASE WHEN sa.owner_type = 'user' AND sa.owner_user_id <> ? THEN 'บัญชีสมาชิก' ELSE COALESCE(sa.name, t.source_account) END END AS source_account,
              CASE WHEN da.owner_type = 'user' AND da.owner_user_id <> ? THEN 'บัญชีสมาชิก' ELSE COALESCE(da.name, t.destination_account) END AS destination_account,
-             t.source_account_id, t.destination_account_id, t.owner_name, t.payer_name,
+             CASE WHEN t.scope = 'family' AND sa.owner_type = 'user' AND sa.owner_user_id <> ? THEN NULL ELSE t.source_account_id END AS source_account_id,
+             CASE WHEN t.scope = 'family' AND da.owner_type = 'user' AND da.owner_user_id <> ? THEN NULL ELSE t.destination_account_id END AS destination_account_id,
+             t.owner_name, t.payer_name,
              (SELECT r.id FROM receipt_attachments r WHERE r.transaction_id = t.id AND r.deleted_at IS NULL ORDER BY r.id DESC LIMIT 1) AS receipt_id,
              u.display_name AS recorder_name, t.icon
       FROM transactions t
@@ -1523,7 +1536,7 @@ async function handle(request, response) {
         )
       )` : 'AND t.deleted_at IS NULL'}
       ORDER BY t.occurred_at DESC, t.id DESC
-    `, includeTrash ? [user.id, user.id, user.id, user.id, user.id, selectedFamily, user.id, user.id] : [user.id, user.id, user.id, user.id, user.id, selectedFamily])
+    `, includeTrash ? [user.id, user.id, user.id, user.id, user.id, user.id, user.id, selectedFamily, user.id, user.id] : [user.id, user.id, user.id, user.id, user.id, user.id, user.id, selectedFamily])
     const mapped = rows.map(mapTransaction)
     if (mapped.length) {
       const ids = mapped.map((row) => row.id)

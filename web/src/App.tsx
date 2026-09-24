@@ -174,10 +174,14 @@ function App() {
     if (!authUser) { setRecurringRules([]); setRecurringReviews([]); return }
     const query = new URLSearchParams({ scope })
     if (scope === 'family' && activeFamilyId) query.set('familyId', String(activeFamilyId))
-    Promise.all([fetch(`/api/recurring-rules?${query}`), fetch(`/api/recurring-reviews?${query}`)]).then(async ([rulesResponse, reviewsResponse]) => {
+    let active = true
+    const refreshRecurring = () => Promise.all([fetch(`/api/recurring-rules?${query}`), fetch(`/api/recurring-reviews?${query}`)]).then(async ([rulesResponse, reviewsResponse]) => {
       if (!rulesResponse.ok || !reviewsResponse.ok) throw new Error('โหลดรายการประจำไม่สำเร็จ')
       return [await rulesResponse.json() as RecurringRule[], await reviewsResponse.json() as RecurringReview[]] as const
-    }).then(([rules, reviews]) => { setRecurringRules(rules); setRecurringReviews(reviews) }).catch(() => { setRecurringRules([]); setRecurringReviews([]) })
+    }).then(([rules, reviews]) => { if (active) { setRecurringRules(rules); setRecurringReviews(reviews) } }).catch(() => { if (active) { setRecurringRules([]); setRecurringReviews([]) } })
+    void refreshRecurring()
+    const refreshTimer = window.setInterval(refreshRecurring, 60_000)
+    return () => { active = false; window.clearInterval(refreshTimer) }
   }, [authUser, scope, activeFamilyId, financeVersion])
 
   useEffect(() => {

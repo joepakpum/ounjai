@@ -117,6 +117,24 @@ function recurringReviewDates(rule, todayKey) {
   return dates
 }
 
+async function processRecurringReviews() {
+  const today = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Bangkok', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date())
+  const [rules] = await pool.execute("SELECT * FROM recurring_rules WHERE paused_at IS NULL AND (ends_on IS NULL OR ends_on >= starts_on)")
+  for (const rule of rules) {
+    const dates = recurringReviewDates(rule, today)
+    if (!dates.length) continue
+    const [latestRows] = await pool.execute('SELECT MAX(review_date) AS latest_date FROM recurring_reviews WHERE recurring_rule_id = ?', [rule.id])
+    const latestDate = latestRows[0]?.latest_date ? String(latestRows[0].latest_date).slice(0, 10) : null
+    const dueDates = dates.filter((date) => !latestDate || date > latestDate)
+    if (!dueDates.length) continue
+    const values = dueDates.map((reviewDate) => {
+      const payload = { ruleId: Number(rule.id), kind: rule.kind, title: rule.title, categoryId: rule.category_id == null ? null : Number(rule.category_id), amount: Number(rule.amount), sourceAccountId: Number(rule.source_account_id), destinationAccountId: rule.destination_account_id == null ? null : Number(rule.destination_account_id), owner: rule.owner_name, payer: rule.payer_name, icon: rule.icon, occurredAt: `${reviewDate} 12:00:00` }
+      return [rule.id, reviewDate, reviewDate, JSON.stringify(payload)]
+    })
+    await pool.query('INSERT IGNORE INTO recurring_reviews (recurring_rule_id, cycle_key, review_date, payload) VALUES ?', [values])
+  }
+}
+
 function receiptSuggestions(text) {
   const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
   const totalLine = lines.find((line) => /ยอดสุทธิ|ยอดชำระ|รวมทั้งสิ้น|grand total|total/i.test(line))
@@ -1016,16 +1034,7 @@ async function handle(request, response) {
     const familyId = Number(url.searchParams.get('familyId')) || user.families[0]?.id || 0
     if (scope === 'family' && !user.families.some((family) => family.id === familyId)) return send(response, 403, { error: 'คุณไม่มีสิทธิ์ดูรายการรอตรวจนี้' })
     const ownerType = scope === 'family' ? 'family' : 'user'; const ownerRef = scope === 'family' ? familyId : user.id
-    const [rules] = await pool.execute(`SELECT * FROM recurring_rules WHERE owner_type = ? AND owner_ref = ? AND (owner_type = 'family' OR created_by_user_id = ?)`, [ownerType, ownerRef, user.id])
-    const today = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Bangkok', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date())
-    for (const rule of rules) {
-      if (rule.paused_at) continue
-      const reviewDates = recurringReviewDates(rule, today)
-      for (const reviewDate of reviewDates) {
-        const payload = { ruleId: Number(rule.id), kind: rule.kind, title: rule.title, categoryId: rule.category_id == null ? null : Number(rule.category_id), amount: Number(rule.amount), sourceAccountId: Number(rule.source_account_id), destinationAccountId: rule.destination_account_id == null ? null : Number(rule.destination_account_id), owner: rule.owner_name, payer: rule.payer_name, icon: rule.icon, occurredAt: `${reviewDate} 12:00:00` }
-        await pool.execute(`INSERT IGNORE INTO recurring_reviews (recurring_rule_id, cycle_key, review_date, payload) VALUES (?, ?, ?, ?)`, [rule.id, reviewDate, reviewDate, JSON.stringify(payload)])
-      }
-    }
+    await processRecurringReviews()
     const [reviews] = await pool.execute(`
       SELECT rr.id, rr.cycle_key, rr.review_date, rr.payload, r.owner_type, r.owner_ref, r.created_by_user_id, u.display_name AS creator_name
       FROM recurring_reviews rr JOIN recurring_rules r ON r.id = rr.recurring_rule_id JOIN users u ON u.id = r.created_by_user_id
@@ -1508,6 +1517,10 @@ const server = http.createServer((request, response) => {
 await migrate(pool)
 await syncConfiguredSuperAdmin()
 server.listen(port, '0.0.0.0', () => console.log(`saving API listening on ${port}`))
+
+processRecurringReviews().catch((error) => console.error('Initial recurring review generation failed', error))
+const recurringWorker = setInterval(() => processRecurringReviews().catch((error) => console.error('Recurring review generation failed', error)), 60_000)
+recurringWorker.unref()
 
 async function shutdown() {
   server.close()

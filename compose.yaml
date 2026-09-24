@@ -1,0 +1,74 @@
+name: saving
+
+services:
+  mysql:
+    image: docker.io/library/mysql:8.4
+    container_name: saving-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-saving}
+      MYSQL_USER: ${MYSQL_USER:-saving_app}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-saving-local-app}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-saving-local-root}
+      TZ: Asia/Bangkok
+    ports:
+      - "127.0.0.1:${MYSQL_PORT:-3306}:3306"
+    volumes:
+      - saving_mysql_data:/var/lib/mysql
+      - ./database/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - mysqladmin ping --host=127.0.0.1 --user=root --password="$${MYSQL_ROOT_PASSWORD}" --silent
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+
+  api:
+    build:
+      context: ./api
+    container_name: saving-api
+    restart: unless-stopped
+    environment:
+      PORT: 3000
+      MYSQL_HOST: mysql
+      MYSQL_PORT: 3306
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-saving}
+      MYSQL_USER: ${MYSQL_USER:-saving_app}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-saving-local-app}
+      TZ: Asia/Bangkok
+    depends_on:
+      mysql:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  web:
+    build:
+      context: ./web
+    container_name: saving-web
+    restart: unless-stopped
+    environment:
+      API_PROXY_TARGET: http://api:3000
+      CHOKIDAR_USEPOLLING: "true"
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${WEB_PORT:-5173}:5173"
+    volumes:
+      - ./web:/app
+      - saving_web_node_modules:/app/node_modules
+
+volumes:
+  saving_mysql_data:
+  saving_web_node_modules:

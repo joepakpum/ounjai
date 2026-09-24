@@ -1191,13 +1191,35 @@ async function handle(request, response) {
     if (!rule || !canManageRecurringRule(user, rule)) return send(response, 404, { error: 'ไม่พบรายการประจำหรือคุณไม่มีสิทธิ์จัดการ' })
     if (method === 'DELETE') { await pool.execute('UPDATE recurring_rules SET paused_at = UTC_TIMESTAMP() WHERE id = ?', [rule.id]); return send(response, 200, { ok: true, paused: true }) }
     const body = await readJson(request)
+    const title = body.title === undefined ? rule.title : String(body.title).trim()
     const amount = body.amount === undefined ? Number(rule.amount) : Number(body.amount)
     const frequency = body.frequency === undefined ? rule.frequency : body.frequency
     const intervalCount = body.intervalCount === undefined ? Number(rule.interval_count) : Number(body.intervalCount)
     const dayOfMonth = body.dayOfMonth === undefined ? rule.day_of_month : body.dayOfMonth === null ? null : Number(body.dayOfMonth)
     const endsOn = body.endsOn === undefined ? rule.ends_on : body.endsOn ? String(body.endsOn) : null
-    if (!Number.isFinite(amount) || amount <= 0 || Math.round(amount * 100) !== amount * 100 || !['weekly', 'monthly', 'yearly'].includes(frequency) || !Number.isInteger(intervalCount) || intervalCount < 1 || intervalCount > 52 || dayOfMonth !== null && (!Number.isInteger(dayOfMonth) || dayOfMonth < 1 || dayOfMonth > 31) || endsOn && (!validDateKey(endsOn) || endsOn < String(rule.starts_on).slice(0, 10))) return send(response, 400, { error: 'ข้อมูลรอบรายการประจำไม่ถูกต้อง' })
-    await pool.execute('UPDATE recurring_rules SET amount = ?, frequency = ?, interval_count = ?, day_of_month = ?, ends_on = ?, paused_at = ? WHERE id = ?', [amount, frequency, intervalCount, dayOfMonth, endsOn, body.paused === false ? null : body.paused === true ? new Date() : rule.paused_at, rule.id])
+    const categoryId = body.categoryId === undefined ? rule.category_id : Number(body.categoryId) || null
+    const sourceAccountId = body.sourceAccountId === undefined ? Number(rule.source_account_id) : Number(body.sourceAccountId)
+    const destinationAccountId = body.destinationAccountId === undefined ? (rule.destination_account_id == null ? null : Number(rule.destination_account_id)) : Number(body.destinationAccountId) || null
+    const owner = body.owner === undefined ? rule.owner_name : String(body.owner).trim()
+    const payer = rule.kind === 'expense' ? (body.payer === undefined ? rule.payer_name || '' : String(body.payer).trim()) : null
+    if (!title || title.length > 160 || !Number.isFinite(amount) || amount <= 0 || Math.round(amount * 100) !== amount * 100 || !['weekly', 'monthly', 'yearly'].includes(frequency) || !Number.isInteger(intervalCount) || intervalCount < 1 || intervalCount > 52 || dayOfMonth !== null && (!Number.isInteger(dayOfMonth) || dayOfMonth < 1 || dayOfMonth > 31) || endsOn && (!validDateKey(endsOn) || endsOn < String(rule.starts_on).slice(0, 10)) || !sourceAccountId || rule.kind === 'transfer' && (!destinationAccountId || destinationAccountId === sourceAccountId) || rule.kind !== 'transfer' && !categoryId || !owner || owner.length > 100 || payer && payer.length > 100) return send(response, 400, { error: 'ข้อมูลกติกาประจำไม่ถูกต้อง' })
+    const scope = rule.owner_type === 'family' ? 'family' : 'personal'
+    const familyId = scope === 'family' ? Number(rule.family_id) : null
+    const [members] = scope === 'family' ? await pool.execute('SELECT u.display_name FROM family_members fm JOIN users u ON u.id = fm.user_id WHERE fm.family_id = ? AND fm.left_at IS NULL', [familyId]) : [[]]
+    const permittedNames = scope === 'family' ? [...members.map((member) => member.display_name), 'ครอบครัว'] : [user.displayName]
+    if (!permittedNames.includes(owner) || payer && !permittedNames.includes(payer)) return send(response, 400, { error: 'เจ้าของรายการหรือผู้จ่ายต้องเป็นสมาชิกปัจจุบัน' })
+    const sourceAccount = await accountById(pool, sourceAccountId)
+    if (!await accountVisibleToUser(user, sourceAccount, scope, familyId, 'source', rule.kind)) return send(response, 403, { error: 'ไม่มีสิทธิ์ใช้บัญชีเงินนี้' })
+    let destinationAccount = null
+    if (rule.kind === 'transfer') {
+      destinationAccount = await accountById(pool, destinationAccountId)
+      if (!await accountVisibleToUser(user, destinationAccount, scope, familyId, 'destination', rule.kind)) return send(response, 403, { error: 'ไม่มีสิทธิ์ใช้บัญชีปลายทางนี้' })
+    }
+    if (rule.kind !== 'transfer') {
+      const [categories] = await pool.execute('SELECT id FROM transaction_categories WHERE id = ? AND owner_type = ? AND owner_ref = ? AND kind = ? AND archived_at IS NULL', [categoryId, rule.owner_type, rule.owner_ref, rule.kind])
+      if (!categories.length) return send(response, 400, { error: 'เลือกหมวดในขอบเขตนี้ก่อนบันทึกกติกา' })
+    }
+    await pool.execute('UPDATE recurring_rules SET title = ?, amount = ?, category_id = ?, source_account_id = ?, destination_account_id = ?, owner_name = ?, payer_name = ?, frequency = ?, interval_count = ?, day_of_month = ?, ends_on = ?, paused_at = ? WHERE id = ?', [title, amount, rule.kind === 'transfer' ? null : categoryId, sourceAccountId, rule.kind === 'transfer' ? destinationAccountId : null, owner, payer, frequency, intervalCount, dayOfMonth, endsOn, body.paused === false ? null : body.paused === true ? new Date() : rule.paused_at, rule.id])
     return send(response, 200, { ok: true })
   }
 

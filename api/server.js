@@ -1073,6 +1073,13 @@ async function handle(request, response) {
         return send(response, 200, { ok: true, dismissed: true })
       }
       const payload = typeof review.review_payload === 'string' ? JSON.parse(review.review_payload) : review.review_payload
+      if (body.edits && typeof body.edits === 'object') {
+        const title = body.edits.title === undefined ? payload.title : String(body.edits.title).trim()
+        const amount = body.edits.amount === undefined ? Number(payload.amount) : Number(body.edits.amount)
+        const occurredAt = body.edits.occurredAt === undefined ? payload.occurredAt : String(body.edits.occurredAt)
+        if (!title || title.length > 160 || !Number.isFinite(amount) || amount <= 0 || Math.round(amount * 100) !== amount * 100 || !validLocalDateTime(occurredAt)) { await connection.rollback(); return send(response, 400, { error: 'กรุณาตรวจชื่อ ยอดเงิน และวันเวลาของรายการให้ถูกต้อง' }) }
+        payload.title = title; payload.amount = amount; payload.occurredAt = occurredAt
+      }
       const scope = review.owner_type === 'family' ? 'family' : 'personal'
       const familyId = review.family_id == null ? null : Number(review.family_id)
       const membership = familyId && user.families.find((family) => family.id === familyId)

@@ -260,5 +260,6 @@
 - Migration `007-allocation-audit-action.js` deploy กับ `saving-api`; `/api/health` ภายในคอนเทนเนอร์รายงาน MySQL และ migration row มีอยู่
 - รัน Tesseract `tha+eng` ใน API container กับภาพทดสอบสังเคราะห์ชั่วคราว อ่านข้อความและยอด `123.45` ได้; ยังไม่ใช่การตรวจคุณภาพกับสลิปจริง
 - การทดสอบเดิม budget movement บน MySQL แยกผ่านสำเร็จ/ประวัติ/ยอดไม่พอ; backup restore ผ่านใน MySQL ชั่วคราว แต่ยังไม่มี fixture สลิปจริง
-- งานถัดไป: ตรวจ API permissions และ auth/invite flows ให้ครบ; pagination; visual smoke มือถือ/เดสก์ท็อป; OCR และกู้คืนไฟล์สลิปจริง; budget notification/cycle policy; export/delete account; encrypted/offsite/scheduled backup; security gate ก่อน domain
+- permission matrix ที่ทดสอบแล้ว: สมาชิกอ่านรายการครอบครัวได้แต่แก้รายการที่คนอื่นสร้างหรือแก้บัญชี/หมวดครอบครัวไม่ได้; คนนอกถูกปฏิเสธบัญชี/หมวด/งบ/รายการประจำ/ผู้รับโอน/สลิป และไม่ได้รายการครอบครัว; ยังต้องตรวจ flows auth/invite และ permission อื่นทั้งหมด
+- งานถัดไป: pagination; visual smoke มือถือ/เดสก์ท็อป; OCR และกู้คืนไฟล์สลิปจริง; budget notification/cycle policy; export/delete account; encrypted/offsite/scheduled backup; security gate ก่อน domain
 - Cloudflare Tunnel ยังคงปิด

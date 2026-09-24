@@ -45,6 +45,18 @@ const formatMoney = (value: number) => new Intl.NumberFormat('th-TH', { minimumF
 const bangkokToday = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Bangkok', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date())
 const monthStart = (date: string) => `${date.slice(0, 7)}-01`
 
+async function apiFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+  const unavailable = (status: number) => new Response(JSON.stringify({ error: 'เชื่อมต่อระบบไม่สำเร็จ กรุณาตรวจสอบอินเทอร์เน็ตแล้วลองใหม่' }), {
+    status,
+    headers: { 'content-type': 'application/json; charset=utf-8' },
+  })
+  let response: Response
+  try { response = await globalThis.fetch(input, init) }
+  catch { return unavailable(503) }
+  if (response.headers.get('content-type')?.toLowerCase().includes('application/json')) return response
+  return unavailable(response.status >= 400 ? response.status : 502)
+}
+
 function App() {
   const [transactions, setTransactions] = useState<Transaction[]>([])
   const [transactionPage, setTransactionPage] = useState(1)
@@ -133,7 +145,7 @@ function App() {
     }
     const restoreSession = async () => {
       if (verifyToken) {
-        const response = await fetch('/api/auth/verify-email', {
+        const response = await apiFetch('/api/auth/verify-email', {
           method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ token: verifyToken, inviteToken: invitationToken }),
         })
         const result = await response.json() as { user?: AuthUser; error?: string }
@@ -142,11 +154,11 @@ function App() {
         cleanUrl()
       }
       if (!verifyToken || !active) {
-        const response = await fetch('/api/auth/me')
+        const response = await apiFetch('/api/auth/me')
         if (active && response.ok) {
           let result = await response.json() as { user: AuthUser }
           if (invitationToken) {
-            const joined = await fetch('/api/families/invitations/accept', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ token: invitationToken }) })
+            const joined = await apiFetch('/api/families/invitations/accept', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ token: invitationToken }) })
             const joinResult = await joined.json() as { user?: AuthUser; error?: string }
             if (joined.ok && joinResult.user) result = { user: joinResult.user }
             else if (joined.status !== 409) setAuthMessage(joinResult.error || 'เข้าร่วมครอบครัวไม่สำเร็จ')
@@ -156,7 +168,7 @@ function App() {
             if (joined.ok || joined.status === 409) setInviteToken('')
           }
           setAuthUser(result.user)
-        }
+        } else if (active && response.status >= 500) setAuthMessage('ระบบยังเชื่อมต่อไม่ได้ กรุณาตรวจสอบอินเทอร์เน็ตแล้วลองใหม่')
       }
       if (active) setAuthChecked(true)
     }
@@ -166,7 +178,7 @@ function App() {
 
   useEffect(() => {
     if (!authUser) { setFamilyInfo([]); return }
-    fetch('/api/families').then((response) => response.ok ? response.json() as Promise<FamilyInfo[]> : []).then(setFamilyInfo).catch(() => setFamilyInfo([]))
+    apiFetch('/api/families').then((response) => response.ok ? response.json() as Promise<FamilyInfo[]> : []).then(setFamilyInfo).catch(() => setFamilyInfo([]))
   }, [authUser])
 
   useEffect(() => {
@@ -179,7 +191,7 @@ function App() {
     Promise.all(scopes.map(async ({ scope: selectedScope, familyId }) => {
       const query = new URLSearchParams({ scope: selectedScope })
       if (familyId) query.set('familyId', String(familyId))
-      const [accountsResponse, categoriesResponse] = await Promise.all([fetch(`/api/accounts?${query}`), fetch(`/api/categories?${query}`)])
+      const [accountsResponse, categoriesResponse] = await Promise.all([apiFetch(`/api/accounts?${query}`), apiFetch(`/api/categories?${query}`)])
       if (!accountsResponse.ok || !categoriesResponse.ok) throw new Error('โหลดบัญชีเงินหรือหมวดหมู่ไม่สำเร็จ')
       return { accounts: await accountsResponse.json() as MoneyAccount[], categories: await categoriesResponse.json() as Category[] }
     })).then((results) => { if (active) { setMoneyAccounts(results.flatMap((result) => result.accounts)); setCategoryItems(results.flatMap((result) => result.categories)) } }).catch(() => { if (active) notify('โหลดบัญชีเงินหรือหมวดหมู่ไม่สำเร็จ') })
@@ -190,7 +202,7 @@ function App() {
     if (!authUser) { setBudgets([]); return }
     const query = new URLSearchParams({ scope })
     if (scope === 'family' && activeFamilyId) query.set('familyId', String(activeFamilyId))
-    fetch(`/api/budgets?${query}`).then(async (response) => {
+    apiFetch(`/api/budgets?${query}`).then(async (response) => {
       if (!response.ok) throw new Error('โหลดงบประมาณไม่สำเร็จ')
       return response.json() as Promise<Budget[]>
     }).then(setBudgets).catch(() => setBudgets([]))
@@ -200,7 +212,7 @@ function App() {
     if (!authUser) { setBudgetMovements([]); return }
     const query = new URLSearchParams({ scope })
     if (scope === 'family' && activeFamilyId) query.set('familyId', String(activeFamilyId))
-    fetch(`/api/budgets/movements?${query}`).then(async (response) => {
+    apiFetch(`/api/budgets/movements?${query}`).then(async (response) => {
       if (!response.ok) throw new Error('โหลดประวัติย้ายงบไม่สำเร็จ')
       return response.json() as Promise<BudgetMovement[]>
     }).then(setBudgetMovements).catch(() => setBudgetMovements([]))
@@ -211,7 +223,7 @@ function App() {
     const query = new URLSearchParams({ scope })
     if (scope === 'family' && activeFamilyId) query.set('familyId', String(activeFamilyId))
     let active = true
-    const refreshRecurring = () => Promise.all([fetch(`/api/recurring-rules?${query}`), fetch(`/api/recurring-reviews?${query}`)]).then(async ([rulesResponse, reviewsResponse]) => {
+    const refreshRecurring = () => Promise.all([apiFetch(`/api/recurring-rules?${query}`), apiFetch(`/api/recurring-reviews?${query}`)]).then(async ([rulesResponse, reviewsResponse]) => {
       if (!rulesResponse.ok || !reviewsResponse.ok) throw new Error('โหลดรายการประจำไม่สำเร็จ')
       return [await rulesResponse.json() as RecurringRule[], await reviewsResponse.json() as RecurringReview[]] as const
     }).then(([rules, reviews]) => { if (active) { setRecurringRules(rules); setRecurringReviews(reviews) } }).catch(() => { if (active) { setRecurringRules([]); setRecurringReviews([]) } })
@@ -223,7 +235,7 @@ function App() {
   useEffect(() => {
     if (!authUser || !activeFamilyId) { setTransferRecipientAccounts([]); return }
     let active = true
-    fetch(`/api/families/${activeFamilyId}/transfer-recipients`).then(async (response) => {
+    apiFetch(`/api/families/${activeFamilyId}/transfer-recipients`).then(async (response) => {
       if (!response.ok) throw new Error('โหลดบัญชีผู้รับโอนไม่สำเร็จ')
       return response.json() as Promise<TransferRecipientAccount[]>
     }).then((accounts) => { if (active) setTransferRecipientAccounts(accounts) }).catch(() => { if (active) setTransferRecipientAccounts([]) })
@@ -277,7 +289,7 @@ function App() {
     } else { setTransactions([]); setTransactionsLoading(false); setTransactionPageInfo({ page: 1, pageSize: 30, total: 0, totalPages: 0 }); setApiStatus('connected'); return () => { active = false } }
     const queryText = query.toString()
     setTransactionsLoading(true)
-    fetch(paginated ? `/api/transactions/page?${queryText}` : `/api/transactions${queryText ? `?${queryText}` : ''}`)
+    apiFetch(paginated ? `/api/transactions/page?${queryText}` : `/api/transactions${queryText ? `?${queryText}` : ''}`)
       .then(async (response) => {
         if (!response.ok) throw new Error('โหลดรายการไม่สำเร็จ')
         return response.json() as Promise<Transaction[] | TransactionPageResult>
@@ -303,7 +315,7 @@ function App() {
     if (search.trim()) query.set('search', search.trim())
     setReportSummary(null)
     setReportLoading(true)
-    fetch(`/api/transactions/summary?${query}`)
+    apiFetch(`/api/transactions/summary?${query}`)
       .then(async (response) => {
         if (!response.ok) throw new Error('โหลดสรุปรายการไม่สำเร็จ')
         return response.json() as Promise<ReportSummary>
@@ -347,7 +359,7 @@ function App() {
         if (scope === 'family' && activeFamilyId) query.set('familyId', String(activeFamilyId))
         if (kind) query.set('kind', kind)
         if (search.trim()) query.set('search', search.trim())
-        const response = await fetch(`/api/transactions/page?${query}`)
+        const response = await apiFetch(`/api/transactions/page?${query}`)
         if (!response.ok) throw new Error('โหลดรายการเพื่อส่งออกไม่สำเร็จ')
         const result = await response.json() as TransactionPageResult
         exported.push(...result.rows); totalPages = result.totalPages; page += 1
@@ -362,7 +374,7 @@ function App() {
 
   async function exportAccountData() {
     try {
-      const response = await fetch('/api/account/export')
+      const response = await apiFetch('/api/account/export')
       if (!response.ok) {
         const result = await response.json() as { error?: string }
         throw new Error(result.error || 'ส่งออกข้อมูลบัญชีไม่สำเร็จ')
@@ -412,7 +424,7 @@ function App() {
   function changeFormScope(nextScope: Scope) {
     if (!authUser || formScope === nextScope) return
     receiptUploadSequence.current += 1
-    if (receiptId) void fetch(`/api/receipts/${receiptId}`, { method: 'DELETE', headers: { 'content-type': 'application/json' }, body: '{}' })
+    if (receiptId) void apiFetch(`/api/receipts/${receiptId}`, { method: 'DELETE', headers: { 'content-type': 'application/json' }, body: '{}' })
     const hadReceipt = Boolean(receiptId || selectedReceipt || filePreview)
     if (filePreview) URL.revokeObjectURL(filePreview)
     setReceiptId(null); setSelectedReceipt(null); setFilePreview(''); setReceiptSuggestion(null)
@@ -427,18 +439,18 @@ function App() {
     if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type)) { notify('รองรับภาพ JPEG, PNG หรือ WebP'); event.target.value = ''; return }
     const uploadSequence = ++receiptUploadSequence.current
     event.target.value = ''
-    if (receiptId) void fetch(`/api/receipts/${receiptId}`, { method: 'DELETE', headers: { 'content-type': 'application/json' }, body: '{}' })
+    if (receiptId) void apiFetch(`/api/receipts/${receiptId}`, { method: 'DELETE', headers: { 'content-type': 'application/json' }, body: '{}' })
     setReceiptId(null)
     if (filePreview) URL.revokeObjectURL(filePreview)
     setFilePreview(URL.createObjectURL(file)); setSelectedReceipt(file); setReceiptSuggestion(null)
     const reader = new FileReader()
     reader.onload = async () => {
       try {
-        const response = await fetch('/api/receipts', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ fileName: file.name, mimeType: file.type, data: reader.result, scope: formScope, familyId: formScope === 'family' ? activeFamilyId : undefined }) })
+        const response = await apiFetch('/api/receipts', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ fileName: file.name, mimeType: file.type, data: reader.result, scope: formScope, familyId: formScope === 'family' ? activeFamilyId : undefined }) })
         const result = await response.json() as { id?: number; extracted?: ReceiptSuggestion; ocrAvailable?: boolean; error?: string }
         if (!response.ok || !result.id) throw new Error(result.error || 'อัปโหลดและอ่านภาพไม่สำเร็จ')
         if (uploadSequence !== receiptUploadSequence.current) {
-          await fetch(`/api/receipts/${result.id}`, { method: 'DELETE', headers: { 'content-type': 'application/json' }, body: '{}' }).catch(() => {})
+          await apiFetch(`/api/receipts/${result.id}`, { method: 'DELETE', headers: { 'content-type': 'application/json' }, body: '{}' }).catch(() => {})
           return
         }
         setReceiptId(result.id); setReceiptSuggestion(result.extracted || null); setReceiptOcrAvailable(Boolean(result.ocrAvailable))
@@ -466,7 +478,7 @@ function App() {
     const previewToRevoke = filePreview
     setModal(false); setSelectedReceipt(null); setReceiptId(null); setReceiptSuggestion(null); setFilePreview('')
     if (previewToRevoke) URL.revokeObjectURL(previewToRevoke)
-    if (receiptToDelete) await fetch(`/api/receipts/${receiptToDelete}`, { method: 'DELETE', headers: { 'content-type': 'application/json' }, body: '{}' }).catch(() => {})
+    if (receiptToDelete) await apiFetch(`/api/receipts/${receiptToDelete}`, { method: 'DELETE', headers: { 'content-type': 'application/json' }, body: '{}' }).catch(() => {})
   }
 
   async function saveTransaction(event: FormEvent<HTMLFormElement>) {
@@ -491,14 +503,14 @@ function App() {
       icon: formKind === 'income' ? '💰' : formKind === 'transfer' ? '↗' : '🧾',
     }
     try {
-      const response = await fetch(editingTransactionId ? `/api/transactions/${editingTransactionId}` : '/api/transactions', {
+      const response = await apiFetch(editingTransactionId ? `/api/transactions/${editingTransactionId}` : '/api/transactions', {
         method: editingTransactionId ? 'PATCH' : 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
       })
       const saved = await response.json() as Transaction | { error?: string }
       if (!response.ok || !('id' in saved)) throw new Error('error' in saved ? saved.error : 'บันทึกรายการไม่สำเร็จ')
       let receiptAttached = false
       if (receiptId) {
-        const attached = await fetch(`/api/receipts/${receiptId}/attach`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ transactionId: saved.id }) })
+        const attached = await apiFetch(`/api/receipts/${receiptId}/attach`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ transactionId: saved.id }) })
         receiptAttached = attached.ok
         if (!receiptAttached) notify('บันทึกรายการแล้ว แต่แนบภาพไม่สำเร็จ')
       }
@@ -512,7 +524,7 @@ function App() {
 
   function trashTransaction(item: Transaction) {
     askConfirmation(`ย้าย “${item.title}” ไปถังขยะหรือไม่?`, async () => {
-    const response = await fetch(`/api/transactions/${item.id}`, { method: 'DELETE', headers: { 'content-type': 'application/json' }, body: '{}' })
+    const response = await apiFetch(`/api/transactions/${item.id}`, { method: 'DELETE', headers: { 'content-type': 'application/json' }, body: '{}' })
     const result = await response.json() as { error?: string }
     if (!response.ok) return notify(result.error || 'ย้ายรายการไปถังขยะไม่สำเร็จ')
     setTransactions((items) => items.filter((current) => current.id !== item.id)); setFinanceVersion((value) => value + 1); notify('ย้ายรายการไปถังขยะแล้ว')
@@ -520,7 +532,7 @@ function App() {
   }
 
   async function restoreTransaction(item: Transaction) {
-    const response = await fetch(`/api/transactions/${item.id}/restore`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })
+    const response = await apiFetch(`/api/transactions/${item.id}/restore`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })
     const result = await response.json() as { transaction?: Transaction; error?: string }
     if (!response.ok) return notify(result.error || 'กู้คืนรายการไม่สำเร็จ')
     setTransactions((items) => items.filter((current) => current.id !== item.id)); setFinanceVersion((value) => value + 1); notify('กู้คืนรายการแล้ว')
@@ -529,7 +541,7 @@ function App() {
   function deleteReceipt(item: Transaction) {
     if (!item.receiptId) return
     askConfirmation('ลบภาพสลิปที่แนบกับรายการนี้หรือไม่?', async () => {
-    const response = await fetch(`/api/receipts/${item.receiptId}`, { method: 'DELETE', headers: { 'content-type': 'application/json' }, body: '{}' })
+    const response = await apiFetch(`/api/receipts/${item.receiptId}`, { method: 'DELETE', headers: { 'content-type': 'application/json' }, body: '{}' })
     const result = await response.json() as { error?: string }
     if (!response.ok) return notify(result.error || 'ลบภาพสลิปไม่สำเร็จ')
     setTransactions((items) => items.map((current) => current.id === item.id ? { ...current, receiptId: null } : current)); notify('ลบภาพสลิปแล้ว')
@@ -538,7 +550,7 @@ function App() {
 
   async function saveMoneyAccount(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
-    const response = await fetch('/api/accounts', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ scope, familyId: scope === 'family' ? activeFamilyId : undefined, name: accountName.trim(), accountType, openingBalance: Number(accountOpeningBalance), openingDate: accountOpeningDate }) })
+    const response = await apiFetch('/api/accounts', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ scope, familyId: scope === 'family' ? activeFamilyId : undefined, name: accountName.trim(), accountType, openingBalance: Number(accountOpeningBalance), openingDate: accountOpeningDate }) })
     const result = await response.json() as { error?: string }
     if (!response.ok) return notify(result.error || 'สร้างบัญชีเงินไม่สำเร็จ')
     setFinanceVersion((value) => value + 1); setAccountDialog(false); setAccountName(''); setAccountOpeningBalance('0'); notify('เพิ่มบัญชีเงินแล้ว')
@@ -552,7 +564,7 @@ function App() {
     event.preventDefault()
     if (!accountEditDraft) return
     const { account, name, accountType, openingBalance, openingDate } = accountEditDraft
-    const response = await fetch(`/api/accounts/${account.id}`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: name.trim(), openingBalance: Number(openingBalance), openingDate, accountType }) })
+    const response = await apiFetch(`/api/accounts/${account.id}`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: name.trim(), openingBalance: Number(openingBalance), openingDate, accountType }) })
     const result = await response.json() as { error?: string }
     if (!response.ok) return notify(result.error || 'แก้ไขบัญชีเงินไม่สำเร็จ')
     setAccountEditDraft(null); setFinanceVersion((value) => value + 1); notify('แก้ไขบัญชีเงินแล้ว')
@@ -560,7 +572,7 @@ function App() {
 
   function archiveMoneyAccount(account: MoneyAccount) {
     askConfirmation(`ปิดบัญชี “${account.name}” หรือไม่? ประวัติเดิมจะยังอยู่`, async () => {
-    const response = await fetch(`/api/accounts/${account.id}`, { method: 'DELETE', headers: { 'content-type': 'application/json' }, body: '{}' })
+    const response = await apiFetch(`/api/accounts/${account.id}`, { method: 'DELETE', headers: { 'content-type': 'application/json' }, body: '{}' })
     const result = await response.json() as { error?: string }
     if (!response.ok) return notify(result.error || 'ปิดบัญชีเงินไม่สำเร็จ')
     setFinanceVersion((value) => value + 1); notify('ปิดบัญชีเงินแล้ว')
@@ -575,7 +587,7 @@ function App() {
     event.preventDefault()
     if (!categoryEditDraft) return
     const draft = categoryEditDraft
-    const response = await fetch(draft.id ? `/api/categories/${draft.id}` : '/api/categories', { method: draft.id ? 'PATCH' : 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(draft.id ? { name: draft.name.trim() } : { scope, familyId: scope === 'family' ? activeFamilyId : undefined, kind: draft.kind, name: draft.name.trim() }) })
+    const response = await apiFetch(draft.id ? `/api/categories/${draft.id}` : '/api/categories', { method: draft.id ? 'PATCH' : 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(draft.id ? { name: draft.name.trim() } : { scope, familyId: scope === 'family' ? activeFamilyId : undefined, kind: draft.kind, name: draft.name.trim() }) })
     const result = await response.json() as { error?: string }
     if (!response.ok) return notify(result.error || (draft.id ? 'แก้ไขหมวดหมู่ไม่สำเร็จ' : 'เพิ่มหมวดหมู่ไม่สำเร็จ'))
     setCategoryEditDraft(null); setFinanceVersion((value) => value + 1); notify(draft.id ? 'แก้ไขหมวดหมู่แล้ว' : 'เพิ่มหมวดหมู่แล้ว')
@@ -583,7 +595,7 @@ function App() {
 
   function archiveCategory(category: Category) {
     askConfirmation(`ซ่อนหมวดหมู่ “${category.name}” จากรายการใหม่หรือไม่?`, async () => {
-    const response = await fetch(`/api/categories/${category.id}`, { method: 'DELETE', headers: { 'content-type': 'application/json' }, body: '{}' })
+    const response = await apiFetch(`/api/categories/${category.id}`, { method: 'DELETE', headers: { 'content-type': 'application/json' }, body: '{}' })
     const result = await response.json() as { error?: string }
     if (!response.ok) return notify(result.error || 'ซ่อนหมวดหมู่ไม่สำเร็จ')
     setFinanceVersion((value) => value + 1); notify('ซ่อนหมวดหมู่แล้ว')
@@ -605,14 +617,14 @@ function App() {
     if (!budgetEditDraft) return
     const draft = budgetEditDraft
     const payload = { categoryId: Number(draft.categoryId), amount: Number(draft.amount), periodType: draft.periodType, cycleStartDay: Number(draft.cycleStartDay), periodStart: draft.periodType === 'custom' ? draft.periodStart : null, periodEnd: draft.periodType === 'custom' ? draft.periodEnd : null, alertPercent: Number(draft.alertPercent) }
-    const response = await fetch(draft.id ? `/api/budgets/${draft.id}` : '/api/budgets', { method: draft.id ? 'PATCH' : 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(draft.id ? payload : { ...payload, scope, familyId: scope === 'family' ? activeFamilyId : undefined }) })
+    const response = await apiFetch(draft.id ? `/api/budgets/${draft.id}` : '/api/budgets', { method: draft.id ? 'PATCH' : 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(draft.id ? payload : { ...payload, scope, familyId: scope === 'family' ? activeFamilyId : undefined }) })
     const result = await response.json() as { error?: string }
     if (!response.ok) return notify(result.error || (draft.id ? 'แก้ไขงบไม่สำเร็จ' : 'สร้างงบไม่สำเร็จ'))
     setBudgetEditDraft(null); setFinanceVersion((value) => value + 1); notify(draft.id ? 'แก้ไขงบประมาณแล้ว' : 'สร้างงบประมาณแล้ว')
   }
 
   async function archiveBudget(budgetId: number) {
-    const response = await fetch(`/api/budgets/${budgetId}`, { method: 'DELETE', headers: { 'content-type': 'application/json' }, body: '{}' })
+    const response = await apiFetch(`/api/budgets/${budgetId}`, { method: 'DELETE', headers: { 'content-type': 'application/json' }, body: '{}' })
     const result = await response.json() as { error?: string }
     if (!response.ok) return notify(result.error || 'ปิดงบไม่สำเร็จ')
     setBudgetEditDraft(null); setFinanceVersion((value) => value + 1); notify('ปิดงบแล้ว')
@@ -628,7 +640,7 @@ function App() {
     event.preventDefault()
     if (!budgetMoveDraft) return
     const draft = budgetMoveDraft
-    const response = await fetch('/api/budgets/movements', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ fromBudgetId: Number(draft.fromBudgetId), toBudgetId: Number(draft.toBudgetId), amount: Number(draft.amount) }) })
+    const response = await apiFetch('/api/budgets/movements', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ fromBudgetId: Number(draft.fromBudgetId), toBudgetId: Number(draft.toBudgetId), amount: Number(draft.amount) }) })
     const result = await response.json() as { error?: string }
     if (!response.ok) return notify(result.error || 'ย้ายงบไม่สำเร็จ')
     setBudgetMoveDraft(null); setFinanceVersion((value) => value + 1); notify('ย้ายวงเงินระหว่างหมวดแล้ว')
@@ -654,7 +666,7 @@ function App() {
     if (!recurringDraft) return
     const draft = recurringDraft
     const payload = { scope: draft.scope, familyId: draft.familyId || undefined, kind: draft.kind, title: draft.title.trim(), amount: Number(draft.amount), categoryId: draft.kind === 'transfer' ? undefined : Number(draft.categoryId), sourceAccountId: Number(draft.sourceAccountId), destinationAccountId: draft.kind === 'transfer' ? Number(draft.destinationAccountId) : undefined, frequency: draft.frequency, intervalCount: Number(draft.intervalCount), dayOfMonth: draft.frequency === 'monthly' ? Number(draft.dayOfMonth) : null, startsOn: draft.startsOn, endsOn: draft.endsOn || null, owner: draft.owner, payer: draft.kind === 'expense' ? draft.payer : undefined }
-    const response = await fetch(draft.id ? `/api/recurring-rules/${draft.id}` : '/api/recurring-rules', { method: draft.id ? 'PATCH' : 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) })
+    const response = await apiFetch(draft.id ? `/api/recurring-rules/${draft.id}` : '/api/recurring-rules', { method: draft.id ? 'PATCH' : 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) })
     const result = await response.json() as { error?: string }
     if (!response.ok) return notify(result.error || (draft.id ? 'แก้ไขรายการประจำไม่สำเร็จ' : 'สร้างรายการประจำไม่สำเร็จ'))
     setRecurringDraft(null); setFinanceVersion((value) => value + 1); notify(draft.id ? 'แก้ไขกติกาประจำแล้ว' : 'สร้างกติกาประจำแล้ว')
@@ -662,14 +674,14 @@ function App() {
 
   async function toggleRecurringRule(rule: RecurringRule) {
     if (!rule.canManage) return
-    const response = await fetch(`/api/recurring-rules/${rule.id}`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ amount: rule.amount, frequency: rule.frequency, intervalCount: rule.intervalCount, dayOfMonth: rule.dayOfMonth, endsOn: rule.endsOn, paused: !rule.paused }) })
+    const response = await apiFetch(`/api/recurring-rules/${rule.id}`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ amount: rule.amount, frequency: rule.frequency, intervalCount: rule.intervalCount, dayOfMonth: rule.dayOfMonth, endsOn: rule.endsOn, paused: !rule.paused }) })
     const result = await response.json() as { error?: string }
     if (!response.ok) return notify(result.error || 'เปลี่ยนสถานะรายการประจำไม่สำเร็จ')
     setFinanceVersion((value) => value + 1); notify(rule.paused ? 'เปิดรายการประจำแล้ว' : 'หยุดรายการประจำชั่วคราวแล้ว')
   }
 
   async function reviewRecurring(review: RecurringReview, action: 'confirm' | 'dismiss', edits?: { title: string; amount: number; occurredAt: string }) {
-    const response = await fetch(`/api/recurring-reviews/${review.id}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action, edits }) })
+    const response = await apiFetch(`/api/recurring-reviews/${review.id}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action, edits }) })
     const result = await response.json() as { error?: string }
     if (!response.ok) { notify(result.error || 'ตรวจรายการประจำไม่สำเร็จ'); return false }
     setFinanceVersion((value) => value + 1); notify(action === 'confirm' ? 'ยืนยันรายการประจำและบันทึกยอดแล้ว' : 'ไม่บันทึกรายการรอบนี้')
@@ -689,7 +701,7 @@ function App() {
   }
 
   async function viewHistory(item: Transaction) {
-    const response = await fetch(`/api/transactions/${item.id}/history`)
+    const response = await apiFetch(`/api/transactions/${item.id}/history`)
     const result = await response.json() as AuditHistory[] | { error?: string }
     if (!response.ok || !Array.isArray(result)) return notify(!Array.isArray(result) ? result.error || 'โหลดประวัติไม่สำเร็จ' : 'โหลดประวัติไม่สำเร็จ')
     setHistoryEntries(result)
@@ -698,7 +710,7 @@ function App() {
   async function openSplitEditor(item: Transaction) {
     if (!authUser) return
     const currentUser = authUser
-    const response = await fetch(`/api/transactions/${item.id}/allocations`)
+    const response = await apiFetch(`/api/transactions/${item.id}/allocations`)
     const result = await response.json() as Allocation[] | { error?: string }
     if (!response.ok || !Array.isArray(result)) return notify(!Array.isArray(result) ? result.error || 'โหลดส่วนแบ่งไม่สำเร็จ' : 'โหลดส่วนแบ่งไม่สำเร็จ')
     const categoriesForTransaction = categoryItems.filter((category) => category.kind === item.kind && category.ownerType === (item.scope === 'family' ? 'family' : 'user') && category.ownerRef === (item.scope === 'family' ? activeFamilyId : currentUser.id))
@@ -711,7 +723,7 @@ function App() {
     const allocations = splitRows.map((row) => ({ categoryId: Number(row.categoryId), amount: Number(row.amount), ownerIsFamily: row.owner === 'family', ownerUserId: row.owner === 'family' ? null : Number(row.owner) }))
     const sumCents = allocations.reduce((sum, item) => sum + Math.round(item.amount * 100), 0)
     if (sumCents !== Math.round(splitTransaction.amount * 100)) return notify('ยอดส่วนแบ่งรวมต้องเท่ากับยอดรายการพอดี')
-    const response = await fetch(`/api/transactions/${splitTransaction.id}/allocations`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ allocations }) })
+    const response = await apiFetch(`/api/transactions/${splitTransaction.id}/allocations`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ allocations }) })
     const result = await response.json() as { error?: string }
     if (!response.ok) return notify(result.error || 'บันทึกส่วนแบ่งไม่สำเร็จ')
     setSplitTransaction(null); setSplitRows([]); setFinanceVersion((value) => value + 1); notify('บันทึกส่วนแบ่งรายการแล้ว')
@@ -750,20 +762,20 @@ function App() {
   }
 
   async function signOut() {
-    await fetch('/api/auth/logout', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })
+    await apiFetch('/api/auth/logout', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })
     setAuthUser(null)
     setTransactions([])
   }
 
   async function refreshFamilies() {
-    const response = await fetch('/api/families')
+    const response = await apiFetch('/api/families')
     if (response.ok) setFamilyInfo(await response.json() as FamilyInfo[])
-    const me = await fetch('/api/auth/me')
+    const me = await apiFetch('/api/auth/me')
     if (me.ok) setAuthUser((await me.json() as { user: AuthUser }).user)
   }
 
   async function createInvitation(familyId: number) {
-    const response = await fetch(`/api/families/${familyId}/invitations`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })
+    const response = await apiFetch(`/api/families/${familyId}/invitations`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })
     const result = await response.json() as { link?: string; error?: string }
     if (!response.ok || !result.link) return notify(result.error || 'สร้างลิงก์เชิญไม่สำเร็จ')
     setInviteLink(result.link)
@@ -771,7 +783,7 @@ function App() {
   }
 
   async function revokeInvitation(familyId: number, invitationId: number) {
-    const response = await fetch(`/api/families/${familyId}/invitations/${invitationId}`, { method: 'DELETE', headers: { 'content-type': 'application/json' }, body: '{}' })
+    const response = await apiFetch(`/api/families/${familyId}/invitations/${invitationId}`, { method: 'DELETE', headers: { 'content-type': 'application/json' }, body: '{}' })
     const result = await response.json() as { error?: string }
     if (!response.ok) return notify(result.error || 'ยกเลิกคำเชิญไม่สำเร็จ')
     await refreshFamilies(); notify('ยกเลิกลิงก์เชิญแล้ว')
@@ -779,7 +791,7 @@ function App() {
 
   function leaveFamily(familyId: number) {
     askConfirmation('ออกจากครอบครัวนี้หรือไม่? ประวัติเดิมจะยังคงอยู่ในสรุปครอบครัว', async () => {
-    const response = await fetch(`/api/families/${familyId}/leave`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })
+    const response = await apiFetch(`/api/families/${familyId}/leave`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })
     const result = await response.json() as { error?: string }
     if (!response.ok) return notify(result.error || 'ออกจากครอบครัวไม่สำเร็จ')
     await refreshFamilies(); notify('ออกจากครอบครัวแล้ว')
@@ -788,13 +800,13 @@ function App() {
 
   async function authenticated(user: AuthUser) {
     if (inviteToken) {
-      const response = await fetch('/api/families/invitations/accept', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ token: inviteToken }) })
+      const response = await apiFetch('/api/families/invitations/accept', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ token: inviteToken }) })
       const result = await response.json() as { user?: AuthUser; error?: string }
       if (!response.ok && response.status !== 409) { setAuthMessage(result.error || 'เข้าร่วมครอบครัวไม่สำเร็จ'); setAuthUser(user); return }
       setInviteToken('')
       window.history.replaceState({}, '', window.location.pathname)
       if (result.user) user = result.user
-      else { const me = await fetch('/api/auth/me'); if (me.ok) user = (await me.json() as { user: AuthUser }).user }
+      else { const me = await apiFetch('/api/auth/me'); if (me.ok) user = (await me.json() as { user: AuthUser }).user }
       setAuthMessage('เข้าร่วมครอบครัวแล้ว')
     }
     setAuthUser(user)
@@ -924,7 +936,7 @@ function AuthScreen({ resetToken, inviteToken, initialMessage, onAuthenticated }
       : mode === 'reset' ? { token: resetToken, password }
         : { email, ...(mode === 'login' ? { password } : {}) }
     try {
-      const response = await fetch(`/api/auth/${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+      const response = await apiFetch(`/api/auth/${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
       const result = await response.json() as { user?: AuthUser; message?: string; error?: string }
       if (!response.ok) throw new Error(result.error || 'ทำรายการไม่สำเร็จ')
       if (result.user) { onAuthenticated(result.user); return }

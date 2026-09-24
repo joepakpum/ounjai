@@ -8,9 +8,9 @@ Run from the repository root in PowerShell while `saving-mysql` and `saving-api`
 ./scripts/backup.ps1
 ```
 
-The API waits for in-flight requests to finish before closing its MySQL pool, and Compose allows up to 45 seconds for graceful shutdown.
+The script stops `saving-web` and then `saving-api`. The API waits for in-flight requests to finish before closing its MySQL pool, and Compose allows up to 45 seconds for graceful shutdown. It takes the database snapshot with the API stopped, restarts the API and waits for its health check, then archives receipt files while the web remains stopped. This keeps browser uploads, deletes, and the recurring worker from changing receipt files during capture.
 
-The script briefly stops `saving-web` while it captures both files, leaving API background work available to archive the private receipt volume; it restarts the web service afterward. The pause prevents browser requests from changing attached receipts during capture. It writes a timestamped folder under `backups/` with a MySQL dump, a compressed archive of receipt images, and a manifest. The folder is ignored by Git because it contains private financial data. Store a copy on encrypted storage with access limited to the family owner. The script does not encrypt the backup itself.
+It writes a timestamped folder under `backups/` with a MySQL dump, a compressed archive of receipt images, a manifest, and SHA-256 hashes for both payload files. It restarts the API before the web; if the API does not become healthy, it leaves the web stopped and reports the recovery step. The folder is ignored by Git because it contains private financial data. Store a copy on encrypted storage with access limited to the family owner. The script does not encrypt the backup itself.
 
 Use an external schedule to run it regularly and keep more than one dated copy. Before upgrades, create an extra backup and confirm both files exist and have nonzero size.
 
@@ -18,9 +18,18 @@ Use an external schedule to run it regularly and keep more than one dated copy. 
 
 Recovery replaces the live financial database and receipt archive. First make a new backup of the current state. Then use a known-good backup folder and run each command from the repository root in PowerShell. Keep the Cloudflare Tunnel profile stopped throughout recovery.
 
+New backups include SHA-256 values in `manifest.txt`; the restore snippet checks them before prompting to replace live data. Earlier backup folders without these values can still be restored, but their payloads are not checksum-verified by this snippet.
+
 ```powershell
-$backup = (Resolve-Path '.\backups\YYYYMMDD-HHMMSS').Path
+$backup = (Resolve-Path '.\backups\YYYYMMDD-HHMMSS-fff').Path
 if (!(Test-Path (Join-Path $backup 'mysql.sql')) -or !(Test-Path (Join-Path $backup 'receipts.tar.gz'))) { throw 'Backup files are missing.' }
+$manifest = Join-Path $backup 'manifest.txt'
+if (Test-Path $manifest) {
+  $expectedMysql = (Get-Content $manifest | Where-Object { $_ -like 'SHA256_mysql.sql=*' } | Select-Object -First 1) -replace '^SHA256_mysql.sql=', ''
+  $expectedReceipts = (Get-Content $manifest | Where-Object { $_ -like 'SHA256_receipts.tar.gz=*' } | Select-Object -First 1) -replace '^SHA256_receipts.tar.gz=', ''
+  if ($expectedMysql -and (Get-FileHash (Join-Path $backup 'mysql.sql') -Algorithm SHA256).Hash -ne $expectedMysql) { throw 'MySQL backup checksum does not match.' }
+  if ($expectedReceipts -and (Get-FileHash (Join-Path $backup 'receipts.tar.gz') -Algorithm SHA256).Hash -ne $expectedReceipts) { throw 'Receipt archive checksum does not match.' }
+}
 $confirmation = Read-Host 'This replaces live financial data. Type RESTORE saving to continue'
 if ($confirmation -cne 'RESTORE saving') { throw 'Restore cancelled.' }
 podman compose stop web api

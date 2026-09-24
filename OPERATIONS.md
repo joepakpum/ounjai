@@ -8,7 +8,7 @@ Run from the repository root in PowerShell while `saving-mysql` and `saving-api`
 ./scripts/backup.ps1
 ```
 
-The script writes a timestamped folder under `backups/` with a MySQL dump, a compressed archive of receipt images, and a manifest. The folder is ignored by Git because it contains private financial data. Store a copy on encrypted storage with access limited to the family owner. The script does not encrypt the backup itself.
+The script briefly stops `saving-web` and `saving-api` while it captures both files so new entries cannot land between the database dump and receipt archive; it restarts them afterward. It writes a timestamped folder under `backups/` with a MySQL dump, a compressed archive of receipt images, and a manifest. The folder is ignored by Git because it contains private financial data. Store a copy on encrypted storage with access limited to the family owner. The script does not encrypt the backup itself.
 
 Use an external schedule to run it regularly and keep more than one dated copy. Before upgrades, create an extra backup and confirm both files exist and have nonzero size.
 

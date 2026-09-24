@@ -14,7 +14,12 @@ foreach ($container in @($mysqlContainer, $apiContainer)) {
 }
 
 New-Item -ItemType Directory -Path $backupDirectory -Force | Out-Null
+$servicesStopped = $false
 try {
+  podman compose stop web api | Out-Null
+  if ($LASTEXITCODE -ne 0) { throw 'Could not stop web and api for a consistent backup.' }
+  $servicesStopped = $true
+
   podman exec $mysqlContainer sh -c 'mysqldump --user=root --password="$MYSQL_ROOT_PASSWORD" --single-transaction --routines --triggers --hex-blob "$MYSQL_DATABASE" > /tmp/saving-mysql-backup.sql'
   if ($LASTEXITCODE -ne 0) { throw 'MySQL dump failed.' }
   podman cp "${mysqlContainer}:/tmp/saving-mysql-backup.sql" (Join-Path $backupDirectory 'mysql.sql')
@@ -27,6 +32,9 @@ try {
 
   podman exec $mysqlContainer rm -f /tmp/saving-mysql-backup.sql | Out-Null
   podman exec $apiContainer rm -f /tmp/saving-receipts-backup.tar.gz | Out-Null
+  foreach ($file in @('mysql.sql', 'receipts.tar.gz')) {
+    if ((Get-Item -LiteralPath (Join-Path $backupDirectory $file)).Length -eq 0) { throw "Backup file $file is empty." }
+  }
   @(
     "CreatedAt=$((Get-Date).ToString('o'))"
     "DatabaseContainer=$mysqlContainer"
@@ -37,4 +45,9 @@ try {
 } catch {
   Write-Error $_
   throw
+} finally {
+  if ($servicesStopped) {
+    podman compose start api web | Out-Null
+    if ($LASTEXITCODE -ne 0) { Write-Error 'Backup finished, but web/api could not be restarted. Run podman compose up -d api web.' }
+  }
 }

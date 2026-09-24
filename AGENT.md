@@ -7,7 +7,7 @@
 - อ่าน [CONTEXT.md](CONTEXT.md) สำหรับคำศัพท์ และ [PLAN.md](PLAN.md) สำหรับลำดับงานและเกณฑ์รับงาน
 - ข้อกำหนดที่ยืนยันแล้วต้องคงอยู่ในแผน แม้แบ่งส่งมอบหลายระยะ ห้ามถือว่าการเลื่อนไประยะถัดไปคือการตัดฟีเจอร์
 - ผู้ใช้กำหนดแล้วให้รันด้วย Podman Compose และใช้ MySQL
-- รองรับ Cloudflare Tunnel ผ่านบริการ Compose profile `tunnel`; เก็บ token ใน `.env` ที่ไม่ commit และให้ tunnel ชี้ origin ภายในไปที่ `http://web:5173`
+- รองรับ Cloudflare Tunnel ผ่านบริการ Compose profile `tunnel`; เก็บ token ใน `.env` ที่ไม่ commit และให้ tunnel ชี้ origin ภายในไปที่ `http://web:8080` (พอร์ต Nginx ในคอนเทนเนอร์)
 - ห้ามเปิด Cloudflare Tunnel หรือให้โดเมนสาธารณะเข้าถึงแอป จนกว่าระบบล็อกอิน การแยกสิทธิ์ การจำกัดข้อมูลตามผู้ใช้ และการตรวจรับความปลอดภัยจะเสร็จ
 - หน้าเว็บอยู่ใน `web/` ใช้ React, TypeScript และ Vite; production image สร้าง static bundle และให้ Nginx เสิร์ฟ
 - API อยู่ใน `api/` ใช้ Node.js, mysql2, Argon2id และ Nodemailer; schema เริ่มต้นอยู่ใน `database/init/` และ migration อยู่ใน `api/migrations/`

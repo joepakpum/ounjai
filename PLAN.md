@@ -4,7 +4,7 @@
 
 สถานะ ณ 24 กันยายน 2026: ระบบ API/หน้าใช้งานจริงครอบคลุมบัญชีเงิน หมวด รายการ รายงาน งบ การย้ายงบ รายการประจำ และสลิป OCR; migration 007 เพิ่ม action audit สำหรับการแบ่งรายการ หลัง integration check พบว่า enum เดิมทำให้ endpoint แบ่งรายการ rollback; ทดสอบใน MySQL จำลองแล้วผ่านการสร้างรายรับ/รายจ่าย/โอน แก้ยอด แบ่ง 2 ส่วน ย้ายถังขยะ/กู้คืน และตรวจยอดบัญชีรายรับรายจ่าย/โอนกับการปิดบังบัญชีสมาชิก; migration 007 deploy บน Podman แล้ว health check ผ่าน; Cloudflare Tunnel ยังคงปิด
 
-ยังไม่ถือว่าเสร็จ 100%: ยังต้องทำ API permission matrix/integration tests ครบเส้นทาง, pagination รายงาน, ตรวจหน้าจอมือถือ, ตรวจ OCR/restore ด้วยภาพจริง, ทำกติกาและการแจ้งเตือนงบให้ชัด, ทบทวนการจัดการข้อมูล/บัญชี และ security gate ก่อนเปิดโดเมน; backup ที่มีอยู่มี dump และ archive ที่กู้คืนฐานข้อมูลได้ แต่ไม่มีไฟล์สลิปจริงให้ซ้อม; worker ใช้ in-app polling เท่านั้น และยังไม่มี push/email ขณะปิดแอป; สำรองนอกเครื่อง/เข้ารหัส/ตั้งเวลาอัตโนมัติยังไม่ทำ
+ยังไม่ถือว่าเสร็จ 100%: ยังต้องตรวจ permission/API matrix ที่เหลือและส่งอีเมล SMTP จริงในสภาพแวดล้อมที่อนุญาต, pagination รายงาน, ตรวจหน้าจอมือถือ, ตรวจ OCR/restore ด้วยสลิปจริง, ทำกติกาและช่องทางแจ้งเตือนงบให้ชัด, ทบทวนการจัดการข้อมูล/บัญชี และ security gate ก่อนเปิดโดเมน; backup ที่มีอยู่มี dump และ archive ที่กู้คืนฐานข้อมูลได้ แต่ไม่มีไฟล์สลิปจริงให้ซ้อม; worker ใช้ in-app polling เท่านั้น และยังไม่มี push/email ขณะปิดแอป; สำรองนอกเครื่อง/เข้ารหัส/ตั้งเวลาอัตโนมัติยังไม่ทำ
 
 ## เป้าหมาย: เชื่อมข้อมูลจริงครบทุกหน้าจอ
 
@@ -262,5 +262,6 @@
 - รัน Tesseract `tha+eng` ใน API container กับภาพทดสอบสังเคราะห์ชั่วคราว อ่านข้อความและยอด `123.45` ได้; ยังไม่ใช่การตรวจคุณภาพกับสลิปจริง
 - การทดสอบเดิม budget movement บน MySQL แยกผ่านสำเร็จ/ประวัติ/ยอดไม่พอ; backup restore ผ่านใน MySQL ชั่วคราว แต่ยังไม่มี fixture สลิปจริง
 - permission matrix ที่ทดสอบแล้ว: สมาชิกอ่านรายการครอบครัวได้แต่แก้รายการที่คนอื่นสร้างหรือแก้บัญชี/หมวดครอบครัวไม่ได้; คนนอกถูกปฏิเสธบัญชี/หมวด/งบ/รายการประจำ/ผู้รับโอน/สลิป และไม่ได้รายการครอบครัว; ยังต้องตรวจ flows auth/invite และ permission อื่นทั้งหมด
-- งานถัดไป: pagination; visual smoke มือถือ/เดสก์ท็อป; OCR และกู้คืนไฟล์สลิปจริง; budget notification/cycle policy; export/delete account; encrypted/offsite/scheduled backup; security gate ก่อน domain
+- ตรวจ Auth ใน MySQL จำลอง: unverified login ถูกปฏิเสธ, verify email พร้อม invite และ one-use token ผ่าน, password reset เปลี่ยนรหัสและเพิกถอน sessions เดิม, reset token ใช้ซ้ำไม่ได้, ไม่มี SMTP แล้ว register ตอบ 503, POST ไม่มี Origin ได้ 403; ไม่ได้ส่งอีเมลจริง
+- งานถัดไป: ทดสอบส่ง SMTP ในช่องทางที่ผู้ใช้อนุญาต; pagination; visual smoke มือถือ/เดสก์ท็อป; OCR และกู้คืนไฟล์สลิปจริง; budget notification/cycle policy; export/delete account; encrypted/offsite/scheduled backup; security gate ก่อน domain
 - Cloudflare Tunnel ยังคงปิด

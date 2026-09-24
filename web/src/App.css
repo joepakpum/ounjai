@@ -233,6 +233,7 @@ h1 { margin: 0; font-size: 23px; letter-spacing: -.45px; font-weight: 600; color
   .list-toolbar>.primary-button{min-height:44px;padding:0 10px}
   .table-head{display:none}
   .transaction-row{grid-template-columns:minmax(0,1fr) auto;gap:5px 10px;padding:11px 0;min-height:0}
+  .transaction-row:has(.transaction-actions){position:relative;padding-bottom:50px}
   .transaction-name{grid-column:1;grid-row:1;min-width:0;gap:7px}
   .transaction-name strong{font-size:12px}
   .transaction-name small{font-size:10px}
@@ -243,7 +244,8 @@ h1 { margin: 0; font-size: 23px; letter-spacing: -.45px; font-weight: 600; color
   .owner-chip span{max-width:110px;overflow-wrap:anywhere}
   .owner-chip span small{display:block;font-size:9px}
   .transaction-amount{grid-column:2;grid-row:1;font-size:12px}
-  .transaction-actions{gap:4px}
+  .transaction-actions{position:absolute;left:0;bottom:8px;gap:4px;margin-left:0}
   .transaction-actions button{width:32px;height:32px}
 }
 .transaction-pagination{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:16px;padding-top:12px;border-top:1px solid var(--line,#edf0ec);color:var(--muted,#78837e);font-size:11px}.transaction-pagination>div{display:flex;align-items:center;gap:10px}.transaction-pagination .secondary-button{height:34px}.transaction-pagination .secondary-button:disabled{opacity:.5;cursor:not-allowed}@media(max-width:640px){.transaction-pagination{align-items:flex-start;flex-direction:column;font-size:11px}.transaction-pagination>div{width:100%;justify-content:space-between}.transaction-pagination .secondary-button{min-height:42px}}
+.report-breakdown{padding:4px 18px 14px}.report-breakdown-row{padding:12px 0;border-bottom:1px solid #f0f2f0}.report-breakdown-row:last-child{border-bottom:0}.report-breakdown-heading{display:flex;align-items:center;gap:9px;min-width:0;margin-bottom:8px}.report-breakdown-heading strong{min-width:0;flex:1;color:#56665c;font-size:11px;font-weight:500;overflow-wrap:anywhere}.report-breakdown-heading>b{color:#52645a;font-size:12px;font-weight:600;white-space:nowrap}.report-breakdown .progress-track{height:6px}

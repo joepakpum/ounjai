@@ -270,7 +270,13 @@ function App() {
 
   const categoryTotals = useMemo(() => {
     const totals = new Map<string, number>()
-    for (const item of rangeRows) if (item.scope === scope && item.kind === 'expense') totals.set(item.category, (totals.get(item.category) || 0) + item.amount)
+    for (const item of rangeRows) {
+      if (item.scope !== scope || item.kind !== 'expense') continue
+      const parts = item.allocations?.length
+        ? item.allocations.map((allocation) => ({ category: allocation.category || item.category, amount: allocation.amount }))
+        : [{ category: item.category, amount: item.amount }]
+      for (const part of parts) totals.set(part.category, (totals.get(part.category) || 0) + part.amount)
+    }
     return [...totals].sort((a, b) => b[1] - a[1]).slice(0, 5)
   }, [rangeRows, scope])
   const budgetAlerts = budgets.filter((budget) => budget.spent >= budget.amount * budget.alertPercent / 100)

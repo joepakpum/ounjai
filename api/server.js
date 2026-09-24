@@ -1550,9 +1550,17 @@ const recurringWorker = setInterval(() => processRecurringReviews().catch((error
 recurringWorker.unref()
 
 async function shutdown() {
-  server.close()
+  if (shuttingDown) return
+  shuttingDown = true
+  clearInterval(recurringWorker)
+  const closed = new Promise((resolve) => {
+    server.close(() => resolve())
+    server.closeIdleConnections()
+  })
+  await closed
   await pool.end()
   process.exit(0)
 }
+let shuttingDown = false
 process.on('SIGINT', shutdown)
 process.on('SIGTERM', shutdown)

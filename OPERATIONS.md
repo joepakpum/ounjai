@@ -8,6 +8,8 @@ Run from the repository root in PowerShell while `saving-mysql` and `saving-api`
 ./scripts/backup.ps1
 ```
 
+The API waits for in-flight requests to finish before closing its MySQL pool, and Compose allows up to 45 seconds for graceful shutdown.
+
 The script briefly stops `saving-web` while it captures both files, leaving API background work available to archive the private receipt volume; it restarts the web service afterward. The pause prevents browser requests from changing attached receipts during capture. It writes a timestamped folder under `backups/` with a MySQL dump, a compressed archive of receipt images, and a manifest. The folder is ignored by Git because it contains private financial data. Store a copy on encrypted storage with access limited to the family owner. The script does not encrypt the backup itself.
 
 Use an external schedule to run it regularly and keep more than one dated copy. Before upgrades, create an extra backup and confirm both files exist and have nonzero size.
@@ -37,6 +39,6 @@ Replace `YYYYMMDD-HHMMSS` with the chosen backup folder. Do not restore an unkno
 
 ## Current limitations
 
-- A backup was restored into a disposable MySQL container and the schema migrations and row counts matched. The bundled receipt archive was readable and extracted; the live backup had no receipt rows or image files, so recovery of a real attached image still needs a fixture-based drill.
+- A backup was restored into a disposable MySQL container and the schema migrations and row counts matched. A synthetic receipt was uploaded, attached, archived with a database dump, deleted, then both files were restored into new MySQL/API/volume containers; authenticated download and SHA-256 matched. The live backup had no receipt rows or images, so visual/OCR quality with a real receipt remains unverified.
 - Backups are not encrypted by the script. Protect them with encrypted host storage and access controls.
 - There is no automated scheduler or offsite backup destination configured by the application.

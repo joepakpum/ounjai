@@ -30,6 +30,7 @@ services:
       context: ./api
     container_name: saving-api
     restart: unless-stopped
+    stop_grace_period: 45s
     environment:
       PORT: 3000
       MYSQL_HOST: mysql

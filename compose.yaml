@@ -37,6 +37,14 @@ services:
       MYSQL_DATABASE: ${MYSQL_DATABASE:-saving}
       MYSQL_USER: ${MYSQL_USER:-saving_app}
       MYSQL_PASSWORD: ${MYSQL_PASSWORD:-saving-local-app}
+      APP_BASE_URL: ${APP_BASE_URL:-http://localhost:5173}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_SECURE: ${SMTP_SECURE:-false}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM: ${SMTP_FROM:-}
       TZ: Asia/Bangkok
     depends_on:
       mysql:
@@ -57,17 +65,11 @@ services:
       context: ./web
     container_name: saving-web
     restart: unless-stopped
-    environment:
-      API_PROXY_TARGET: http://api:3000
-      CHOKIDAR_USEPOLLING: "true"
     depends_on:
       api:
         condition: service_healthy
     ports:
-      - "127.0.0.1:${WEB_PORT:-5173}:5173"
-    volumes:
-      - ./web:/app
-      - saving_web_node_modules:/app/node_modules
+      - "127.0.0.1:${WEB_PORT:-5173}:8080"
 
   cloudflared:
     image: docker.io/cloudflare/cloudflared:latest
@@ -83,4 +85,3 @@ services:
 
 volumes:
   saving_mysql_data:
-  saving_web_node_modules:

@@ -12,6 +12,7 @@ import './App.css'
 type Kind = 'expense' | 'income' | 'transfer'
 type Scope = 'family' | 'personal'
 type AuthUser = { id: number; email: string; displayName: string; systemRole: 'user' | 'superadmin'; families: { id: number; name: string; role: 'owner' | 'member' }[] }
+type FamilyInfo = AuthUser['families'][number] & { members: { id: number; displayName: string; email: string; role: 'owner' | 'member'; joinedAt: string }[]; invitations: { id: number; expiresAt: string }[] }
 type Transaction = {
   id: number; title: string; category: string; kind: Kind; amount: number
   date: string; account: string; owner: string; payer?: string; recorder: string; icon: string; scope: Scope
@@ -30,6 +31,10 @@ function App() {
   const [authChecked, setAuthChecked] = useState(false)
   const [authMessage, setAuthMessage] = useState('')
   const [resetToken, setResetToken] = useState('')
+  const [inviteToken, setInviteToken] = useState('')
+  const [familyInfo, setFamilyInfo] = useState<FamilyInfo[]>([])
+  const [activeFamilyId, setActiveFamilyId] = useState<number | null>(null)
+  const [inviteLink, setInviteLink] = useState('')
   const [apiStatus, setApiStatus] = useState<'connecting' | 'connected' | 'offline'>('connecting')
   const [scope, setScope] = useState<Scope>('family')
   const [page, setPage] = useState('ภาพรวม')
@@ -56,26 +61,38 @@ function App() {
     const params = new URLSearchParams(window.location.search)
     const verifyToken = params.get('verify')
     const passwordToken = params.get('reset')
+    const invitationToken = params.get('invite') || ''
+    if (invitationToken) setInviteToken(invitationToken)
     if (passwordToken) setResetToken(passwordToken)
     const cleanUrl = () => {
-      params.delete('verify'); params.delete('reset')
+      params.delete('verify'); params.delete('reset'); params.delete('invite')
       const query = params.toString()
       window.history.replaceState({}, '', `${window.location.pathname}${query ? `?${query}` : ''}`)
     }
     const restoreSession = async () => {
       if (verifyToken) {
         const response = await fetch('/api/auth/verify-email', {
-          method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ token: verifyToken }),
+          method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ token: verifyToken, inviteToken: invitationToken }),
         })
         const result = await response.json() as { user?: AuthUser; error?: string }
-        if (active && response.ok && result.user) setAuthUser(result.user)
+        if (active && response.ok && result.user) { setAuthUser(result.user); if (invitationToken) setInviteToken('') }
         if (active) setAuthMessage(response.ok ? 'ยืนยันอีเมลแล้ว บัญชีของคุณพร้อมใช้งาน' : result.error || 'ยืนยันอีเมลไม่สำเร็จ')
         cleanUrl()
       }
       if (!verifyToken || !active) {
         const response = await fetch('/api/auth/me')
         if (active && response.ok) {
-          const result = await response.json() as { user: AuthUser }
+          let result = await response.json() as { user: AuthUser }
+          if (invitationToken) {
+            const joined = await fetch('/api/families/invitations/accept', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ token: invitationToken }) })
+            const joinResult = await joined.json() as { user?: AuthUser; error?: string }
+            if (joined.ok && joinResult.user) result = { user: joinResult.user }
+            else if (joined.status !== 409) setAuthMessage(joinResult.error || 'เข้าร่วมครอบครัวไม่สำเร็จ')
+            params.delete('invite')
+            const query = params.toString()
+            window.history.replaceState({}, '', `${window.location.pathname}${query ? `?${query}` : ''}`)
+            if (joined.ok || joined.status === 409) setInviteToken('')
+          }
           setAuthUser(result.user)
         }
       }
@@ -86,9 +103,19 @@ function App() {
   }, [])
 
   useEffect(() => {
+    if (!authUser) { setFamilyInfo([]); return }
+    fetch('/api/families').then((response) => response.ok ? response.json() as Promise<FamilyInfo[]> : []).then(setFamilyInfo).catch(() => setFamilyInfo([]))
+  }, [authUser])
+
+  useEffect(() => {
+    if (activeFamilyId && authUser?.families.some((family) => family.id === activeFamilyId)) return
+    setActiveFamilyId(authUser?.families[0]?.id ?? null)
+  }, [authUser, activeFamilyId])
+
+  useEffect(() => {
     let active = true
     if (!authUser) { setTransactions([]); setApiStatus('offline'); return () => { active = false } }
-    fetch('/api/transactions')
+    fetch(`/api/transactions${scope === 'family' && activeFamilyId ? `?familyId=${activeFamilyId}` : ''}`)
       .then(async (response) => {
         if (!response.ok) throw new Error('โหลดรายการไม่สำเร็จ')
         return response.json() as Promise<Transaction[]>
@@ -96,7 +123,7 @@ function App() {
       .then((rows) => { if (active) { setTransactions(rows); setApiStatus('connected') } })
       .catch(() => { if (active) setApiStatus('offline') })
     return () => { active = false }
-  }, [authUser])
+  }, [authUser, scope, activeFamilyId])
 
   const filtered = useMemo(() => transactions.filter((item) => {
     const scopeMatches = item.scope === scope
@@ -141,7 +168,7 @@ function App() {
       kind: formKind, amount, scope: formScope, sourceAccount: formAccount,
       destinationAccount: formDestination, owner: formOwner,
       payer: formKind === 'expense' ? formPayer : undefined, recorder: authUser?.displayName,
-      familyId: formScope === 'family' ? authUser?.families[0]?.id : undefined,
+      familyId: formScope === 'family' ? activeFamilyId : undefined,
       icon: formKind === 'income' ? '💰' : formKind === 'transfer' ? '↗' : '🧾',
     }
     try {
@@ -171,14 +198,58 @@ function App() {
     setTransactions([])
   }
 
+  async function refreshFamilies() {
+    const response = await fetch('/api/families')
+    if (response.ok) setFamilyInfo(await response.json() as FamilyInfo[])
+    const me = await fetch('/api/auth/me')
+    if (me.ok) setAuthUser((await me.json() as { user: AuthUser }).user)
+  }
+
+  async function createInvitation(familyId: number) {
+    const response = await fetch(`/api/families/${familyId}/invitations`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })
+    const result = await response.json() as { link?: string; error?: string }
+    if (!response.ok || !result.link) return notify(result.error || 'สร้างลิงก์เชิญไม่สำเร็จ')
+    setInviteLink(result.link)
+    await refreshFamilies()
+  }
+
+  async function revokeInvitation(familyId: number, invitationId: number) {
+    const response = await fetch(`/api/families/${familyId}/invitations/${invitationId}`, { method: 'DELETE', headers: { 'content-type': 'application/json' }, body: '{}' })
+    const result = await response.json() as { error?: string }
+    if (!response.ok) return notify(result.error || 'ยกเลิกคำเชิญไม่สำเร็จ')
+    await refreshFamilies(); notify('ยกเลิกลิงก์เชิญแล้ว')
+  }
+
+  async function leaveFamily(familyId: number) {
+    if (!window.confirm('ออกจากครอบครัวนี้หรือไม่? ประวัติเดิมจะยังคงอยู่ในสรุปครอบครัว')) return
+    const response = await fetch(`/api/families/${familyId}/leave`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })
+    const result = await response.json() as { error?: string }
+    if (!response.ok) return notify(result.error || 'ออกจากครอบครัวไม่สำเร็จ')
+    await refreshFamilies(); notify('ออกจากครอบครัวแล้ว')
+  }
+
+  async function authenticated(user: AuthUser) {
+    if (inviteToken) {
+      const response = await fetch('/api/families/invitations/accept', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ token: inviteToken }) })
+      const result = await response.json() as { user?: AuthUser; error?: string }
+      if (!response.ok && response.status !== 409) { setAuthMessage(result.error || 'เข้าร่วมครอบครัวไม่สำเร็จ'); setAuthUser(user); return }
+      setInviteToken('')
+      window.history.replaceState({}, '', window.location.pathname)
+      if (result.user) user = result.user
+      else { const me = await fetch('/api/auth/me'); if (me.ok) user = (await me.json() as { user: AuthUser }).user }
+      setAuthMessage('เข้าร่วมครอบครัวแล้ว')
+    }
+    setAuthUser(user)
+  }
+
   if (!authChecked) return <AuthShell><div className="auth-loading">กำลังตรวจสอบบัญชี…</div></AuthShell>
-  if (!authUser) return <AuthScreen resetToken={resetToken} initialMessage={authMessage} onAuthenticated={setAuthUser} />
+  if (!authUser) return <AuthScreen resetToken={resetToken} inviteToken={inviteToken} initialMessage={authMessage} onAuthenticated={authenticated} />
 
   return (
     <div className="app-shell">
       <aside className="sidebar">
         <div className="brand"><div className="brand-mark"><Wallet size={19} strokeWidth={2.4} /></div><div><strong>อุ่นใจ</strong><span>จัดการเงินให้ง่ายขึ้น</span></div></div>
-        <button className="workspace-switch"><div className="workspace-avatar">บ</div><div className="workspace-copy"><strong>{scope === 'family' ? 'บ้านของเรา' : 'พื้นที่ส่วนตัว'}</strong><span>{scope === 'family' ? 'สมาชิก 4 คน' : 'บัญชีส่วนตัว'}</span></div><ChevronDown size={15} /></button>
+        <button className="workspace-switch"><div className="workspace-avatar">{scope === 'family' ? (authUser.families.find((family) => family.id === activeFamilyId)?.name || 'บ').slice(0, 1) : authUser.displayName.slice(0, 1)}</div><div className="workspace-copy"><strong>{scope === 'family' ? authUser.families.find((family) => family.id === activeFamilyId)?.name || 'ยังไม่มีครอบครัว' : 'พื้นที่ส่วนตัว'}</strong><span>{scope === 'family' ? `${familyInfo.find((family) => family.id === activeFamilyId)?.members.length || 0} สมาชิก` : 'บัญชีส่วนตัว'}</span></div><ChevronDown size={15} /></button>
         <div className="nav-label">เมนูหลัก</div>
         <nav className="nav-list">
           {navItems.map(({ label, icon: Icon }) => <button key={label} onClick={() => setPage(label)} className={`nav-item ${page === label ? 'active' : ''}`}><Icon size={18} strokeWidth={1.8} /><span>{label}</span>{label === 'งบประมาณ' && <span className="nav-count">2</span>}</button>)}
@@ -197,14 +268,14 @@ function App() {
         </header>
 
         <div className="content-wrap">
-          <div className="prototype-warning"><strong>ยังไม่พร้อมเปิดใช้งานผ่านโดเมน</strong><span>บัญชีและรายการมีการแยกสิทธิ์เบื้องต้นแล้ว แต่งบ บัญชีเงิน คำเชิญสมาชิก และสิทธิ์ครอบครัวยังอยู่ระหว่างพัฒนา</span></div>
+          <div className="prototype-warning"><strong>ยังไม่พร้อมเปิดใช้งานผ่านโดเมน</strong><span>คำเชิญสมาชิกใช้งานได้แล้ว ส่วนงบ บัญชีเงิน และสิทธิ์แก้ไขรายการยังอยู่ระหว่างพัฒนา</span></div>
           <div className="page-heading">
             <div><div className="eyebrow"><span className="eyebrow-dot" /> ภาพรวมการเงิน</div><h1>{page === 'ภาพรวม' ? `สวัสดี, ${authUser.displayName}` : page}</h1><p>{page === 'ภาพรวม' ? 'มาดูภาพรวมการเงินของบ้านในเดือนนี้กัน' : 'ดูข้อมูลและจัดการรายการของคุณได้ที่นี่'}</p></div>
             <div className="heading-actions"><button className="secondary-button" onClick={() => notify('เตรียมดาวน์โหลดรายงานตัวอย่าง')}><Download size={16} /> <span>ส่งออกรายงาน</span></button><button className="primary-button" onClick={() => openComposer('expense')}><Plus size={17} /> เพิ่มรายการ</button></div>
           </div>
 
           <div className="toolbar">
-            <div className="scope-switch" role="tablist" aria-label="ขอบเขตข้อมูล"><button className={scope === 'family' ? 'selected' : ''} onClick={() => setScope('family')}><Users size={15} /> ครอบครัว</button><button className={scope === 'personal' ? 'selected' : ''} onClick={() => setScope('personal')}><Wallet size={15} /> ส่วนตัว</button></div>
+            <div className="scope-switch" role="tablist" aria-label="ขอบเขตข้อมูล"><button className={scope === 'family' ? 'selected' : ''} onClick={() => setScope('family')} disabled={!authUser.families.length}><Users size={15} /> ครอบครัว</button><button className={scope === 'personal' ? 'selected' : ''} onClick={() => setScope('personal')}><Wallet size={15} /> ส่วนตัว</button>{scope === 'family' && authUser.families.length > 1 && <select aria-label="เลือกครอบครัว" value={activeFamilyId ?? ''} onChange={(event) => setActiveFamilyId(Number(event.target.value))}>{authUser.families.map((family) => <option key={family.id} value={family.id}>{family.name}</option>)}</select>}</div>
             <div className="toolbar-right"><button className="date-picker" onClick={() => setMonthIndex((value) => value === 1 ? -1 : value + 1)}><CalendarDays size={16} />{monthText}<ChevronDown size={14} /></button><div className="period-tabs">{['เดือนนี้', 'กำหนดเอง'].map((item) => <button key={item} onClick={() => setRange(item)} className={range === item ? 'period-active' : ''}>{item}</button>)}</div></div>
           </div>
 
@@ -232,7 +303,7 @@ function App() {
             </section>
           </>}
 
-          {page !== 'ภาพรวม' && <PageContent page={page} rows={filtered} search={search} authUser={authUser} onSearch={setSearch} kindFilter={kindFilter} onKindFilter={setKindFilter} onAdd={() => openComposer(page === 'รายการทั้งหมด' ? 'expense' : 'income')} onToast={notify} />}
+          {page !== 'ภาพรวม' && <PageContent page={page} rows={filtered} search={search} familyInfo={familyInfo} activeFamilyId={activeFamilyId} inviteLink={inviteLink} onCreateInvitation={createInvitation} onRevokeInvitation={revokeInvitation} onLeaveFamily={leaveFamily} onCloseInvite={() => setInviteLink('')} onSearch={setSearch} kindFilter={kindFilter} onKindFilter={setKindFilter} onAdd={() => openComposer(page === 'รายการทั้งหมด' ? 'expense' : 'income')} onToast={notify} />}
         </div>
       </main>
 
@@ -259,7 +330,7 @@ function AuthShell({ children }: { children: ReactNode }) {
   return <div className="auth-shell"><div className="auth-brand"><div className="brand-mark"><Wallet size={19} strokeWidth={2.4}/></div><div><strong>อุ่นใจ</strong><span>จัดการเงินให้ง่ายขึ้น</span></div></div>{children}</div>
 }
 
-function AuthScreen({ resetToken, initialMessage, onAuthenticated }: { resetToken: string; initialMessage: string; onAuthenticated: (user: AuthUser) => void }) {
+function AuthScreen({ resetToken, inviteToken, initialMessage, onAuthenticated }: { resetToken: string; inviteToken: string; initialMessage: string; onAuthenticated: (user: AuthUser) => void }) {
   const [mode, setMode] = useState<'login' | 'register' | 'forgot' | 'reset'>(resetToken ? 'reset' : 'login')
   const [name, setName] = useState('')
   const [email, setEmail] = useState('')
@@ -269,7 +340,7 @@ function AuthScreen({ resetToken, initialMessage, onAuthenticated }: { resetToke
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); setBusy(true); setMessage('')
     const path = mode === 'register' ? 'register' : mode === 'forgot' ? 'forgot-password' : mode === 'reset' ? 'reset-password' : 'login'
-    const body = mode === 'register' ? { displayName: name, email, password }
+    const body = mode === 'register' ? { displayName: name, email, password, inviteToken }
       : mode === 'reset' ? { token: resetToken, password }
         : { email, ...(mode === 'login' ? { password } : {}) }
     try {
@@ -288,7 +359,7 @@ function AuthScreen({ resetToken, initialMessage, onAuthenticated }: { resetToke
       {mode === 'register' && <label>ชื่อที่แสดง<input autoComplete="name" value={name} onChange={(event) => setName(event.target.value)} maxLength={100} required/></label>}
       {mode !== 'reset' && <label>อีเมล<input type="email" autoComplete="email" value={email} onChange={(event) => setEmail(event.target.value)} maxLength={254} required/></label>}
       {(mode === 'login' || mode === 'register' || mode === 'reset') && <label>{mode === 'reset' ? 'รหัสผ่านใหม่' : 'รหัสผ่าน'}<input type="password" autoComplete={mode === 'login' ? 'current-password' : 'new-password'} value={password} onChange={(event) => setPassword(event.target.value)} minLength={15} maxLength={128} required/><small>อย่างน้อย 15 ตัวอักษร</small></label>}
-      {message && <div className="auth-message" role="status">{message}</div>}
+      {(message || inviteToken) && <div className="auth-message" role="status">{message || 'คุณได้รับคำเชิญเข้าร่วมครอบครัวแล้ว เข้าสู่ระบบหรือสร้างบัญชีเพื่อดำเนินการต่อ'}</div>}
       <button className="primary-button auth-submit" type="submit" disabled={busy}>{busy ? 'กำลังดำเนินการ…' : title}</button>
     </form>
     <div className="auth-links">{mode === 'login' && <><button onClick={() => { setMode('forgot'); setMessage('') }}>ลืมรหัสผ่าน?</button><button onClick={() => { setMode('register'); setMessage('') }}>สร้างบัญชีใหม่</button></>}{mode === 'register' && <button onClick={() => { setMode('login'); setMessage('') }}>มีบัญชีแล้ว? เข้าสู่ระบบ</button>}{mode === 'forgot' && <button onClick={() => { setMode('login'); setMessage('') }}>กลับไปเข้าสู่ระบบ</button>}{mode === 'reset' && <button onClick={() => { setMode('login'); setMessage('') }}>กลับไปเข้าสู่ระบบ</button>}</div>
@@ -308,11 +379,11 @@ function AccountRow({ icon, title, owner, amount, tone }: { icon: ReactNode; tit
   return <div className="account-row"><div className={`account-icon ${tone}`}>{icon}</div><div className="account-copy"><strong>{title}</strong><span>{owner}</span></div><div className="account-amount"><strong>฿{amount}</strong><span>ยอดคงเหลือ</span></div></div>
 }
 
-function PageContent({ page, rows, search, authUser, onSearch, kindFilter, onKindFilter, onAdd, onToast }: { page: string; rows: Transaction[]; search: string; authUser: AuthUser; onSearch: (value: string) => void; kindFilter: string; onKindFilter: (value: string) => void; onAdd: () => void; onToast: (message: string) => void }) {
+function PageContent({ page, rows, search, familyInfo, activeFamilyId, inviteLink, onCreateInvitation, onRevokeInvitation, onLeaveFamily, onCloseInvite, onSearch, kindFilter, onKindFilter, onAdd, onToast }: { page: string; rows: Transaction[]; search: string; familyInfo: FamilyInfo[]; activeFamilyId: number | null; inviteLink: string; onCreateInvitation: (familyId: number) => void; onRevokeInvitation: (familyId: number, invitationId: number) => void; onLeaveFamily: (familyId: number) => void; onCloseInvite: () => void; onSearch: (value: string) => void; kindFilter: string; onKindFilter: (value: string) => void; onAdd: () => void; onToast: (message: string) => void }) {
   if (page === 'รายการทั้งหมด') return <div className="panel full-page-panel"><div className="list-toolbar"><div className="search-field"><Search size={16}/><input value={search} onChange={(event) => onSearch(event.target.value)} placeholder="ค้นหารายการ"/></div><select className="filter-select" value={kindFilter} onChange={(event) => onKindFilter(event.target.value)} aria-label="กรองประเภทรายการ"><option>ทั้งหมด</option><option>รายรับ</option><option>รายจ่าย</option><option>โอน</option></select><button className="primary-button" onClick={onAdd}><Plus size={16}/> เพิ่มรายการ</button></div><TransactionTable rows={rows}/></div>
   if (page === 'งบประมาณ') return <div className="page-cards"><div className="panel page-budget-card"><div className="panel-header"><div><div className="panel-title">งบครอบครัว · กันยายน 2569</div><div className="panel-subtitle">ใช้ไป ฿20,800 จากงบทั้งหมด ฿32,500</div></div><button className="primary-button" onClick={() => onToast('เปิดแบบฟอร์มตั้งงบประมาณตัวอย่าง')}><Plus size={16}/> เพิ่มงบ</button></div>{[['🏠','บ้านและที่พัก',8500,10000,'teal'],['🍜','อาหารและเครื่องดื่ม',6240,8000,'orange'],['🚗','เดินทาง',2860,5000,'blue'],['📚','การศึกษา',3200,6000,'purple']].map(([icon,name,used,limit,color])=><BudgetRow key={String(name)} icon={String(icon)} name={String(name)} used={Number(used)} limit={Number(limit)} color={String(color)}/>)}</div><div className="panel page-note"><Sparkles size={20}/><strong>งบที่ใช้ไป 64%</strong><p>ต้นแบบนี้แสดงข้อมูลงบตัวอย่าง เมื่อเชื่อมระบบจริงแล้วจะคำนวณจากรายการที่ยืนยัน</p></div></div>
   if (page === 'บัญชีเงิน') return <div className="panel full-page-panel"><div className="panel-header"><div><div className="panel-title">บัญชีเงินของครอบครัว</div><div className="panel-subtitle">ยอดรวมตัวอย่าง ฿48,260 · มียอดตั้งต้นและรายการล่าสุด</div></div><button className="primary-button" onClick={() => onToast('เพิ่มบัญชีเงินได้ในระยะเชื่อมฐานข้อมูล')}><Plus size={16}/> เพิ่มบัญชี</button></div><div className="account-page-grid"><AccountRow icon={<Banknote size={18}/>} title="เงินสดครอบครัว" owner="ครอบครัว · เงินสด" amount="4,820" tone="mint"/><AccountRow icon={<Landmark size={18}/>} title="KBank •• 4821" owner="พิมพ์ชนก · ธนาคาร" amount="28,440" tone="violet"/><AccountRow icon={<CreditCard size={18}/>} title="SCB •• 1092" owner="ครอบครัว · ธนาคาร" amount="15,000" tone="blue"/></div></div>
-  if (page === 'ครอบครัว') return <div className="page-cards"><div className="panel family-panel"><div className="panel-header"><div><div className="panel-title">สมาชิกในบ้าน</div><div className="panel-subtitle">{authUser.families[0]?.name || 'พื้นที่ครอบครัว'}</div></div><button className="primary-button" disabled onClick={() => onToast('ระบบเชิญสมาชิกยังอยู่ระหว่างพัฒนา')}><Plus size={16}/> เชิญสมาชิก</button></div>{authUser.families.map((family) => <div className="member-row" key={family.id}><div className="avatar member-avatar">{authUser.displayName.slice(0, 1)}</div><div className="member-copy"><strong>{authUser.displayName}</strong><span>{authUser.email}</span></div><span className="member-badge">{family.role === 'owner' ? 'เจ้าของ' : 'สมาชิก'}</span></div>)}{!authUser.families.length && <div className="empty-state">ยังไม่มีครอบครัวที่เข้าร่วม</div>}</div><div className="panel page-note"><Users size={20}/><strong>พื้นที่บัญชีของคุณ</strong><p>ขณะนี้แสดงเฉพาะสมาชิกที่ยืนยันตัวตนแล้ว การเชิญและจัดการสมาชิกยังไม่เปิดใช้งาน</p></div></div>
+  if (page === 'ครอบครัว') return <div className="page-cards"><div className="panel family-panel"><div className="panel-header"><div><div className="panel-title">สมาชิกในบ้าน</div><div className="panel-subtitle">{familyInfo.find((family) => family.id === activeFamilyId)?.name || 'พื้นที่ครอบครัว'}</div></div>{familyInfo.find((family) => family.id === activeFamilyId)?.role === 'owner' && <button className="primary-button" onClick={() => activeFamilyId && onCreateInvitation(activeFamilyId)}><Plus size={16}/> เชิญสมาชิก</button>}</div>{familyInfo.filter((family) => family.id === activeFamilyId).flatMap((family) => <section key={family.id}><div className="member-list">{family.members.map((member, index) => <div className="member-row" key={member.id}><div className={`avatar member-avatar member-${index % 4}`}>{member.displayName.slice(0, 1)}</div><div className="member-copy"><strong>{member.displayName}</strong><span>{member.email}</span></div><span className="member-badge">{member.role === 'owner' ? 'เจ้าของ' : 'สมาชิก'}</span></div>)}</div>{family.role === 'owner' && family.invitations.map((invite) => <div className="member-row" key={invite.id}><div className="avatar member-avatar">✉</div><div className="member-copy"><strong>ลิงก์เชิญรอใช้งาน</strong><span>หมดอายุ {new Date(invite.expiresAt).toLocaleString('th-TH')}</span></div><button className="secondary-button" onClick={() => onRevokeInvitation(family.id, invite.id)}>ยกเลิก</button></div>)}{family.role === 'member' && <button className="secondary-button" onClick={() => onLeaveFamily(family.id)}>ออกจากครอบครัว</button>}</section>)}{!familyInfo.length && <div className="empty-state">ยังไม่มีครอบครัวที่เข้าร่วม</div>}{inviteLink && <div className="invite-result"><strong>ลิงก์เชิญพร้อมแชร์ · ใช้ได้ 7 วัน และใช้ได้ครั้งเดียว</strong><input readOnly value={inviteLink} onFocus={(event) => event.currentTarget.select()}/><button className="primary-button" onClick={() => navigator.clipboard?.writeText(inviteLink).then(() => onToast('คัดลอกลิงก์แล้ว')).catch(() => onToast('เลือกและคัดลอกลิงก์ได้จากช่องด้านบน'))}>คัดลอกลิงก์</button><button className="secondary-button" onClick={onCloseInvite}>ปิด</button></div>}</div><div className="panel page-note"><Users size={20}/><strong>สิทธิ์สมาชิก</strong><p>สมาชิกดูรายการครอบครัวได้ การแก้ไขและการจัดการรายการยังอยู่ระหว่างพัฒนา</p></div></div>
   return <div className="panel empty-section"><Tag size={24}/><h3>{page}</h3><p>ส่วนนี้จะแสดงรายการและตัวกรองตามขอบเขตข้อมูลของคุณ</p><button className="primary-button" onClick={onAdd}><Plus size={16}/> เพิ่มรายการ</button></div>
 }
 

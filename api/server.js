@@ -215,6 +215,7 @@ async function handle(request, response) {
     const email = String(body.email || '').trim().toLowerCase()
     const displayName = String(body.displayName || '').trim()
     const password = String(body.password || '')
+    const inviteToken = typeof body.inviteToken === 'string' ? body.inviteToken : ''
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 254) return send(response, 400, { error: 'กรุณากรอกอีเมลให้ถูกต้อง' })
     if (!displayName || displayName.length > 100) return send(response, 400, { error: 'กรุณากรอกชื่อไม่เกิน 100 ตัวอักษร' })
     if (password.length < 15 || Buffer.byteLength(password, 'utf8') > 128) return send(response, 400, { error: 'รหัสผ่านต้องยาวอย่างน้อย 15 ตัวอักษรและไม่เกิน 128 ไบต์' })
@@ -232,6 +233,7 @@ async function handle(request, response) {
           const token = await issueAccountToken(existing.id, 'verify_email', 24)
           const verificationLink = new URL('/', appBaseUrl)
           verificationLink.searchParams.set('verify', token)
+          if (inviteToken) verificationLink.searchParams.set('invite', inviteToken)
           await sendAccountEmail(email, 'ยืนยันบัญชีอุ่นใจ', verificationLink.href, 'กดลิงก์ด้านล่างเพื่อยืนยันอีเมลและเปิดใช้งานบัญชี')
         }
         return send(response, 202, { message: 'หากอีเมลนี้ยังไม่ได้ยืนยัน ระบบจะส่งลิงก์ยืนยันให้ทางอีเมล' })
@@ -241,6 +243,7 @@ async function handle(request, response) {
     const token = await issueAccountToken(userId, 'verify_email', 24)
     const verificationLink = new URL('/', appBaseUrl)
     verificationLink.searchParams.set('verify', token)
+    if (inviteToken) verificationLink.searchParams.set('invite', inviteToken)
     try {
       await sendAccountEmail(email, 'ยืนยันบัญชีอุ่นใจ', verificationLink.href, 'กดลิงก์ด้านล่างเพื่อยืนยันอีเมลและเปิดใช้งานบัญชี')
     } catch (error) {
@@ -266,7 +269,7 @@ async function handle(request, response) {
   }
 
   if (method === 'POST' && pathname === '/api/auth/verify-email') {
-    const { token = '' } = await readJson(request)
+    const { token = '', inviteToken = '' } = await readJson(request)
     if (typeof token !== 'string' || token.length > 100) return send(response, 400, { error: 'ลิงก์ยืนยันไม่ถูกต้องหรือหมดอายุแล้ว' })
     const connection = await pool.getConnection()
     try {
@@ -280,6 +283,23 @@ async function handle(request, response) {
         await connection.rollback()
         return send(response, 400, { error: 'ลิงก์ยืนยันไม่ถูกต้องหรือหมดอายุแล้ว' })
       }
+      let invitation = null
+      if (inviteToken) {
+        if (typeof inviteToken !== 'string' || inviteToken.length > 100) {
+          await connection.rollback()
+          return send(response, 400, { error: 'ลิงก์เชิญไม่ถูกต้องหรือหมดอายุแล้ว' })
+        }
+        const [invitations] = await connection.execute(`
+          SELECT id, family_id FROM family_invitations
+          WHERE token_hash = ? AND accepted_at IS NULL AND revoked_at IS NULL AND expires_at > UTC_TIMESTAMP()
+          FOR UPDATE
+        `, [digest(inviteToken)])
+        if (!invitations.length) {
+          await connection.rollback()
+          return send(response, 400, { error: 'ลิงก์เชิญไม่ถูกต้องหรือหมดอายุแล้ว' })
+        }
+        invitation = invitations[0]
+      }
       await connection.execute('UPDATE account_tokens SET used_at = UTC_TIMESTAMP() WHERE id = ?', [tokens[0].id])
       await connection.execute('UPDATE users SET email_verified_at = UTC_TIMESTAMP() WHERE id = ?', [tokens[0].user_id])
       const configuredAdminEmail = String(process.env.SYSTEM_ADMIN_EMAIL || '').trim().toLowerCase()
@@ -288,17 +308,25 @@ async function handle(request, response) {
           UPDATE users SET system_role = IF(LOWER(email) = ?, 'superadmin', 'user') WHERE id = ?
         `, [configuredAdminEmail, tokens[0].user_id])
       }
-      const [families] = await connection.execute('SELECT id FROM families WHERE created_by_user_id = ? LIMIT 1', [tokens[0].user_id])
-      let familyId = families[0]?.id
-      if (!familyId) {
-        const [users] = await connection.execute('SELECT display_name FROM users WHERE id = ?', [tokens[0].user_id])
-        const [family] = await connection.execute('INSERT INTO families (name, created_by_user_id) VALUES (?, ?)', [`${users[0].display_name} ของครอบครัว`, tokens[0].user_id])
-        familyId = family.insertId
+      if (invitation) {
+        await connection.execute(`
+          INSERT INTO family_members (family_id, user_id, role) VALUES (?, ?, 'member')
+          ON DUPLICATE KEY UPDATE left_at = NULL, role = 'member', joined_at = CURRENT_TIMESTAMP
+        `, [invitation.family_id, tokens[0].user_id])
+        await connection.execute('UPDATE family_invitations SET accepted_at = UTC_TIMESTAMP(), accepted_by_user_id = ? WHERE id = ?', [tokens[0].user_id, invitation.id])
+      } else {
+        const [families] = await connection.execute('SELECT id FROM families WHERE created_by_user_id = ? LIMIT 1', [tokens[0].user_id])
+        let familyId = families[0]?.id
+        if (!familyId) {
+          const [users] = await connection.execute('SELECT display_name FROM users WHERE id = ?', [tokens[0].user_id])
+          const [family] = await connection.execute('INSERT INTO families (name, created_by_user_id) VALUES (?, ?)', [`${users[0].display_name} ของครอบครัว`, tokens[0].user_id])
+          familyId = family.insertId
+        }
+        await connection.execute(`
+          INSERT INTO family_members (family_id, user_id, role) VALUES (?, ?, 'owner')
+          ON DUPLICATE KEY UPDATE left_at = NULL, role = 'owner'
+        `, [familyId, tokens[0].user_id])
       }
-      await connection.execute(`
-        INSERT INTO family_members (family_id, user_id, role) VALUES (?, ?, 'owner')
-        ON DUPLICATE KEY UPDATE left_at = NULL, role = 'owner'
-      `, [familyId, tokens[0].user_id])
       await connection.commit()
       const [users] = await pool.execute('SELECT id FROM users WHERE id = ?', [tokens[0].user_id])
       await createSession(users[0].id, response)
@@ -336,6 +364,80 @@ async function handle(request, response) {
     const user = await currentUser(request)
     if (!user) return send(response, 401, { error: 'กรุณาเข้าสู่ระบบ' })
     return send(response, 200, { user })
+  }
+
+  if (method === 'GET' && pathname === '/api/families') {
+    const user = await currentUser(request)
+    if (!user) return send(response, 401, { error: 'กรุณาเข้าสู่ระบบ' })
+    const families = []
+    for (const family of user.families) {
+      const [members] = await pool.execute(`
+        SELECT u.id, u.display_name, u.email, fm.role, fm.joined_at
+        FROM family_members fm JOIN users u ON u.id = fm.user_id
+        WHERE fm.family_id = ? AND fm.left_at IS NULL ORDER BY FIELD(fm.role, 'owner', 'member'), fm.joined_at
+      `, [family.id])
+      const pending = family.role === 'owner' ? await pool.execute(`
+        SELECT id, expires_at, created_at FROM family_invitations
+        WHERE family_id = ? AND accepted_at IS NULL AND revoked_at IS NULL AND expires_at > UTC_TIMESTAMP()
+        ORDER BY created_at DESC
+      `, [family.id]) : [[]]
+      families.push({ ...family, members: members.map((member) => ({ id: Number(member.id), displayName: member.display_name, email: member.email, role: member.role, joinedAt: member.joined_at })), invitations: pending[0].map((invite) => ({ id: Number(invite.id), expiresAt: invite.expires_at })) })
+    }
+    return send(response, 200, families)
+  }
+
+  if (method === 'POST' && pathname === '/api/families/invitations/accept') {
+    const user = await currentUser(request)
+    if (!user) return send(response, 401, { error: 'กรุณาเข้าสู่ระบบ' })
+    const { token = '' } = await readJson(request)
+    if (typeof token !== 'string' || token.length > 100) return send(response, 400, { error: 'ลิงก์เชิญไม่ถูกต้องหรือหมดอายุแล้ว' })
+    const connection = await pool.getConnection()
+    try {
+      await connection.beginTransaction()
+      const [invitations] = await connection.execute(`
+        SELECT id, family_id FROM family_invitations
+        WHERE token_hash = ? AND accepted_at IS NULL AND revoked_at IS NULL AND expires_at > UTC_TIMESTAMP()
+        FOR UPDATE
+      `, [digest(token)])
+      if (!invitations.length) { await connection.rollback(); return send(response, 400, { error: 'ลิงก์เชิญถูกใช้แล้ว ถูกยกเลิก หรือหมดอายุแล้ว' }) }
+      const invite = invitations[0]
+      const [existing] = await connection.execute('SELECT left_at FROM family_members WHERE family_id = ? AND user_id = ? FOR UPDATE', [invite.family_id, user.id])
+      if (existing.length && existing[0].left_at === null) { await connection.rollback(); return send(response, 409, { error: 'คุณเป็นสมาชิกครอบครัวนี้อยู่แล้ว' }) }
+      await connection.execute(`
+        INSERT INTO family_members (family_id, user_id, role) VALUES (?, ?, 'member')
+        ON DUPLICATE KEY UPDATE left_at = NULL, role = 'member', joined_at = CURRENT_TIMESTAMP
+      `, [invite.family_id, user.id])
+      await connection.execute('UPDATE family_invitations SET accepted_at = UTC_TIMESTAMP(), accepted_by_user_id = ? WHERE id = ?', [user.id, invite.id])
+      await connection.commit()
+      return send(response, 200, { user: await currentUser(request), message: 'เข้าร่วมครอบครัวแล้ว' })
+    } catch (error) { await connection.rollback(); throw error } finally { connection.release() }
+  }
+
+  const familyRoute = pathname.match(/^\/api\/families\/(\d+)(?:\/(invitations(?:\/(\d+))?|leave))?$/)
+  if (familyRoute && method !== 'GET') {
+    const user = await currentUser(request)
+    if (!user) return send(response, 401, { error: 'กรุณาเข้าสู่ระบบ' })
+    const familyId = Number(familyRoute[1])
+    const action = familyRoute[2]?.startsWith('invitations') ? 'invitations' : familyRoute[2]
+    const membership = user.families.find((family) => family.id === familyId)
+    if (!membership) return send(response, 403, { error: 'คุณไม่มีสิทธิ์จัดการครอบครัวนี้' })
+    if (action === 'invitations' && method === 'POST') {
+      if (membership.role !== 'owner') return send(response, 403, { error: 'เฉพาะเจ้าของครอบครัวเท่านั้นที่เชิญสมาชิกได้' })
+      const token = randomBytes(32).toString('base64url')
+      const [result] = await pool.execute(`INSERT INTO family_invitations (family_id, invited_by_user_id, token_hash, expires_at) VALUES (?, ?, ?, DATE_ADD(UTC_TIMESTAMP(), INTERVAL 7 DAY))`, [familyId, user.id, digest(token)])
+      const link = new URL('/', appBaseUrl); link.searchParams.set('invite', token)
+      return send(response, 201, { id: Number(result.insertId), link: link.href, expiresAt: new Date(Date.now() + 7 * 86400000).toISOString() })
+    }
+    if (action === 'invitations' && method === 'DELETE' && familyRoute[3]) {
+      if (membership.role !== 'owner') return send(response, 403, { error: 'เฉพาะเจ้าของครอบครัวเท่านั้นที่ยกเลิกคำเชิญได้' })
+      const [result] = await pool.execute(`UPDATE family_invitations SET revoked_at = UTC_TIMESTAMP() WHERE id = ? AND family_id = ? AND accepted_at IS NULL AND revoked_at IS NULL`, [Number(familyRoute[3]), familyId])
+      return result.affectedRows ? send(response, 200, { ok: true }) : send(response, 404, { error: 'ไม่พบคำเชิญที่ยังใช้งานได้' })
+    }
+    if (action === 'leave' && method === 'POST') {
+      if (membership.role === 'owner') return send(response, 409, { error: 'เจ้าของครอบครัวยังออกไม่ได้ กรุณาโอนสิทธิ์เจ้าของก่อน' })
+      await pool.execute('UPDATE family_members SET left_at = UTC_TIMESTAMP() WHERE family_id = ? AND user_id = ? AND left_at IS NULL', [familyId, user.id])
+      return send(response, 200, { ok: true })
+    }
   }
 
   if (method === 'POST' && pathname === '/api/auth/forgot-password') {
@@ -387,6 +489,8 @@ async function handle(request, response) {
   if (method === 'GET' && pathname === '/api/transactions') {
     const user = await currentUser(request)
     if (!user) return send(response, 401, { error: 'กรุณาเข้าสู่ระบบ' })
+    const requestedFamily = Number(url.searchParams.get('familyId'))
+    const selectedFamily = requestedFamily || user.families[0]?.id || 0
     const [rows] = await pool.execute(`
       SELECT t.id, t.title, t.category, t.kind, t.amount, t.scope, t.occurred_at,
              t.source_account, t.destination_account, t.owner_name, t.payer_name,
@@ -396,9 +500,10 @@ async function handle(request, response) {
       WHERE (t.scope = 'personal' AND t.created_by_user_id = ?)
          OR (t.scope = 'family' AND t.family_id IN (
            SELECT family_id FROM family_members WHERE user_id = ? AND left_at IS NULL
+             AND family_id = ?
          ))
       ORDER BY t.occurred_at DESC, t.id DESC LIMIT 500
-    `, [user.id, user.id])
+    `, [user.id, user.id, selectedFamily])
     return send(response, 200, rows.map(mapTransaction))
   }
 

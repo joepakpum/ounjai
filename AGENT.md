@@ -7,6 +7,7 @@
 - อ่าน [CONTEXT.md](CONTEXT.md) สำหรับคำศัพท์ และ [PLAN.md](PLAN.md) สำหรับลำดับงานและเกณฑ์รับงาน
 - ข้อกำหนดที่ยืนยันแล้วต้องคงอยู่ในแผน แม้แบ่งส่งมอบหลายระยะ ห้ามถือว่าการเลื่อนไประยะถัดไปคือการตัดฟีเจอร์
 - ผู้ใช้กำหนดแล้วให้รันด้วย Podman Compose และใช้ MySQL
+- รองรับ Cloudflare Tunnel ผ่านบริการ Compose profile `tunnel`; เก็บ token ใน `.env` ที่ไม่ commit และให้ tunnel ชี้ origin ภายในไปที่ `http://web:5173`
 - หน้าเว็บอยู่ใน `web/` ใช้ React, TypeScript และ Vite
 - API อยู่ใน `api/` ใช้ Node.js และ mysql2; schema เริ่มต้นอยู่ใน `database/init/`
 - `compose.yaml` เปิดบริการ `saving-web`, `saving-api`, `saving-mysql`; MySQL ใช้ volume `saving_mysql_data`

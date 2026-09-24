@@ -10,6 +10,16 @@ podman compose up --build -d
 
 เปิดเว็บที่ <http://localhost:5173> ระบบจะสร้างคอนเทนเนอร์ `saving-web`, `saving-api` และ `saving-mysql` พร้อมฐานข้อมูล MySQL ใน named volume ที่คงข้อมูลแม้หยุดคอนเทนเนอร์ เว็บ/API ใช้พอร์ตภายในของ Compose network
 
+## เปิดผ่าน Cloudflare Tunnel
+
+สร้าง remotely-managed tunnel ใน Cloudflare Zero Trust แล้วกำหนด Public Hostname ให้ชี้ไปที่ `http://web:5173` จากนั้นคัดลอก `.env.example` เป็น `.env` และใส่ Tunnel token ใน `CLOUDFLARE_TUNNEL_TOKEN` (อย่า commit ไฟล์ `.env`) เปิดบริการ tunnel ด้วย:
+
+```powershell
+podman compose --profile tunnel up --build -d
+```
+
+บริการ `saving-cloudflared` จะเชื่อมไปยังเว็บผ่าน Compose network โดยไม่ต้องเปิดพอร์ตเว็บออกสู่อินเทอร์เน็ตโดยตรง หยุด tunnel ได้ด้วย `podman compose --profile tunnel stop cloudflared` ส่วนการเปิดแอปในเครื่องโดยไม่ใช้ tunnel ยังคงใช้ `podman compose up --build -d`
+
 ดูสถานะและบันทึกการทำงาน:
 
 ```powershell

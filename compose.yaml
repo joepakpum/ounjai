@@ -69,6 +69,18 @@ services:
       - ./web:/app
       - saving_web_node_modules:/app/node_modules
 
+  cloudflared:
+    image: docker.io/cloudflare/cloudflared:latest
+    container_name: saving-cloudflared
+    restart: unless-stopped
+    profiles:
+      - tunnel
+    environment:
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:-}
+    command: tunnel --no-autoupdate run
+    depends_on:
+      - web
+
 volumes:
   saving_mysql_data:
   saving_web_node_modules:

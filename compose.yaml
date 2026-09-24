@@ -69,6 +69,7 @@ services:
     depends_on:
       api:
         condition: service_healthy
+        restart: true
     ports:
       - "127.0.0.1:${WEB_PORT:-5173}:8080"
 

@@ -261,7 +261,8 @@
 - Migration `007-allocation-audit-action.js` deploy กับ `saving-api`; `/api/health` ภายในคอนเทนเนอร์รายงาน MySQL และ migration row มีอยู่
 - รัน Tesseract `tha+eng` ใน API container กับภาพทดสอบสังเคราะห์ชั่วคราว อ่านข้อความและยอด `123.45` ได้; ยังไม่ใช่การตรวจคุณภาพกับสลิปจริง
 - การทดสอบเดิม budget movement บน MySQL แยกผ่านสำเร็จ/ประวัติ/ยอดไม่พอ; backup restore ผ่านใน MySQL ชั่วคราว แต่ยังไม่มี fixture สลิปจริง
-- permission matrix ที่ทดสอบแล้ว: สมาชิกอ่านรายการครอบครัวได้แต่แก้รายการที่คนอื่นสร้างหรือแก้บัญชี/หมวดครอบครัวไม่ได้; คนนอกถูกปฏิเสธบัญชี/หมวด/งบ/รายการประจำ/ผู้รับโอน/สลิป และไม่ได้รายการครอบครัว; ยังต้องตรวจ flows auth/invite และ permission อื่นทั้งหมด
+- permission matrix ที่ทดสอบแล้ว: สมาชิกอ่านรายการครอบครัวได้แต่แก้รายการที่คนอื่นสร้างหรือแก้บัญชี/หมวดครอบครัวไม่ได้; คนนอกถูกปฏิเสธบัญชี/หมวด/งบ/รายการประจำ/ผู้รับโอน/สลิป และไม่ได้รายการครอบครัว; auth/invite/session หลักและ permission รายการประจำผ่าน MySQL integration แล้ว; ยังต้องตรวจ API path และข้อมูลส่วนตัว/ไฟล์ทั้งหมดอย่างเป็นระบบ
 - ตรวจ Auth ใน MySQL จำลอง: unverified login ถูกปฏิเสธ, verify email พร้อม invite และ one-use token ผ่าน, password reset เปลี่ยนรหัสและเพิกถอน sessions เดิม, reset token ใช้ซ้ำไม่ได้, ไม่มี SMTP แล้ว register ตอบ 503, POST ไม่มี Origin ได้ 403; ไม่ได้ส่งอีเมลจริง
+- ตรวจ recurring review ใน MySQL จำลอง: สร้างรอบ pending หนึ่งครั้ง, member เห็นแต่ยืนยันของผู้สร้างอื่นไม่ได้, owner แก้ยอดก่อนยืนยัน, ยอดเปลี่ยนครั้งเดียว, ยืนยันซ้ำถูกปฏิเสธ และ restart API แล้วยังมี cycle/transaction เดียว
 - งานถัดไป: ทดสอบส่ง SMTP ในช่องทางที่ผู้ใช้อนุญาต; pagination; visual smoke มือถือ/เดสก์ท็อป; OCR และกู้คืนไฟล์สลิปจริง; budget notification/cycle policy; export/delete account; encrypted/offsite/scheduled backup; security gate ก่อน domain
 - Cloudflare Tunnel ยังคงปิด

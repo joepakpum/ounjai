@@ -24,6 +24,7 @@ const pool = mysql.createPool({
 })
 const execFileAsync = promisify(execFile)
 const receiptDirectory = process.env.RECEIPT_STORAGE_PATH || '/var/lib/saving/receipts'
+const budgetSpentScopeSql = `((b.owner_type = 'user' AND t.scope = 'personal' AND t.created_by_user_id = b.owner_user_id) OR (b.owner_type = 'family' AND t.scope = 'family' AND t.family_id = b.family_id))`
 
 const authLimits = new Map()
 const dummyPasswordHash = await argon2.hash(randomBytes(24).toString('base64url'), { type: argon2.argon2id })
@@ -963,7 +964,7 @@ async function handle(request, response) {
       THEN DATE_ADD(DATE_ADD(DATE_FORMAT(CURDATE(), '%Y-%m-01'), INTERVAL b.cycle_start_day - 1 DAY), INTERVAL 1 MONTH)
       ELSE DATE_ADD(DATE_ADD(DATE_FORMAT(DATE_SUB(CURDATE(), INTERVAL 1 MONTH), '%Y-%m-01'), INTERVAL b.cycle_start_day - 1 DAY), INTERVAL 1 MONTH) END)
       OR (b.period_type = 'custom' AND DATE(t.occurred_at) BETWEEN b.period_start AND b.period_end))`
-    const budgetSpentScope = `((b.owner_type = 'user' AND t.scope = 'personal' AND t.created_by_user_id = b.owner_user_id) OR (b.owner_type = 'family' AND t.scope = 'family' AND t.family_id = b.family_id))`
+    const budgetSpentScope = budgetSpentScopeSql
     const [rows] = await pool.execute(`
       SELECT b.id, b.owner_type, b.owner_ref, b.category_id,
         b.amount + COALESCE((SELECT SUM(CASE WHEN bm.to_budget_id = b.id THEN bm.amount WHEN bm.from_budget_id = b.id THEN -bm.amount ELSE 0 END) FROM budget_movements bm WHERE bm.to_budget_id = b.id OR bm.from_budget_id = b.id), 0) AS amount,
@@ -1031,12 +1032,12 @@ async function handle(request, response) {
           AND ((b.period_type = 'monthly' AND DATE(t.occurred_at) >= CASE WHEN DAY(CURDATE()) >= b.cycle_start_day THEN DATE_ADD(DATE_FORMAT(CURDATE(), '%Y-%m-01'), INTERVAL b.cycle_start_day - 1 DAY) ELSE DATE_ADD(DATE_FORMAT(DATE_SUB(CURDATE(), INTERVAL 1 MONTH), '%Y-%m-01'), INTERVAL b.cycle_start_day - 1 DAY) END
             AND DATE(t.occurred_at) < CASE WHEN DAY(CURDATE()) >= b.cycle_start_day THEN DATE_ADD(DATE_ADD(DATE_FORMAT(CURDATE(), '%Y-%m-01'), INTERVAL b.cycle_start_day - 1 DAY), INTERVAL 1 MONTH) ELSE DATE_ADD(DATE_ADD(DATE_FORMAT(DATE_SUB(CURDATE(), INTERVAL 1 MONTH), '%Y-%m-01'), INTERVAL b.cycle_start_day - 1 DAY), INTERVAL 1 MONTH) END)
             OR (b.period_type = 'custom' AND DATE(t.occurred_at) BETWEEN b.period_start AND b.period_end))
-          AND t.scope = b.owner_type AND ((b.owner_type = 'user' AND t.created_by_user_id = b.owner_user_id) OR (b.owner_type = 'family' AND t.family_id = b.family_id))), 0)
+          AND ${budgetSpentScopeSql}), 0)
         - COALESCE((SELECT SUM(a.amount) FROM transaction_allocations a JOIN transactions t ON t.id = a.transaction_id WHERE a.category_id = b.category_id AND t.kind = 'expense' AND t.deleted_at IS NULL
           AND ((b.period_type = 'monthly' AND DATE(t.occurred_at) >= CASE WHEN DAY(CURDATE()) >= b.cycle_start_day THEN DATE_ADD(DATE_FORMAT(CURDATE(), '%Y-%m-01'), INTERVAL b.cycle_start_day - 1 DAY) ELSE DATE_ADD(DATE_FORMAT(DATE_SUB(CURDATE(), INTERVAL 1 MONTH), '%Y-%m-01'), INTERVAL b.cycle_start_day - 1 DAY) END
             AND DATE(t.occurred_at) < CASE WHEN DAY(CURDATE()) >= b.cycle_start_day THEN DATE_ADD(DATE_ADD(DATE_FORMAT(CURDATE(), '%Y-%m-01'), INTERVAL b.cycle_start_day - 1 DAY), INTERVAL 1 MONTH) ELSE DATE_ADD(DATE_ADD(DATE_FORMAT(DATE_SUB(CURDATE(), INTERVAL 1 MONTH), '%Y-%m-01'), INTERVAL b.cycle_start_day - 1 DAY), INTERVAL 1 MONTH) END)
             OR (b.period_type = 'custom' AND DATE(t.occurred_at) BETWEEN b.period_start AND b.period_end))
-          AND t.scope = b.owner_type AND ((b.owner_type = 'user' AND t.created_by_user_id = b.owner_user_id) OR (b.owner_type = 'family' AND t.family_id = b.family_id))), 0) AS available
+          AND ${budgetSpentScopeSql}), 0) AS available
       FROM budgets b WHERE b.id = ?
     `, [fromId])
     if (Number(balance.available) < amount) { await connection.rollback(); return send(response, 409, { error: 'วงเงินคงเหลือหลังหักรายจ่ายไม่พอสำหรับย้าย' }) }

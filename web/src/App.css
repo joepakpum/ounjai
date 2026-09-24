@@ -199,3 +199,31 @@ h1 { margin: 0; font-size: 23px; letter-spacing: -.45px; font-weight: 600; color
 .allocation-modal{max-width:780px}.allocation-editor{display:grid;gap:12px;margin:18px 0}.allocation-edit-row{display:grid;grid-template-columns:1.2fr 1fr .7fr auto;gap:10px;align-items:end;padding:12px;border:1px solid var(--line,#e6e9e5);border-radius:12px;background:#fbfcfa}.allocation-tools{display:flex;align-items:center;gap:10px;flex-wrap:wrap}.allocation-tools strong{margin-left:auto}.allocation-edit-row .input-label{min-width:0}
 @media(max-width:760px){.allocation-edit-row{grid-template-columns:1fr 1fr}.allocation-edit-row .icon-button{grid-column:2;justify-self:end}}
 .recurring-page{display:grid;gap:18px}.recurring-review-row{display:flex;align-items:center;gap:14px;padding:14px 0;border-bottom:1px solid var(--line,#edf0ec)}.recurring-copy{display:grid;gap:5px;min-width:0;flex:1}.recurring-copy strong{color:var(--ink,#26332e);font-size:13px}.recurring-copy span{color:var(--muted,#78837e);font-size:11px}.recurring-actions{display:flex;gap:8px;align-items:center}.recurring-review-row .transaction-amount{white-space:nowrap}@media(max-width:760px){.recurring-review-row{align-items:flex-start;flex-wrap:wrap}.recurring-copy{width:calc(100% - 56px);flex:auto}.recurring-review-row>.transaction-amount{margin-left:44px}.recurring-actions{width:100%;margin-left:44px}.recurring-actions button{flex:1;justify-content:center}}
+@media(max-width:640px){
+  .modal-backdrop{align-items:end;justify-items:center;padding:8px 8px calc(68px + env(safe-area-inset-bottom))}
+  .composer-modal{width:100%;max-height:calc(100dvh - 88px - env(safe-area-inset-bottom));overflow:auto;padding:18px 16px 16px;border-radius:16px}
+  .composer-modal .modal-kicker{font-size:11px}
+  .composer-modal .modal-heading{margin-bottom:15px}
+  .composer-modal .modal-heading h2{font-size:20px}
+  .composer-modal .kind-tabs{margin-bottom:15px}
+  .composer-modal .kind-tabs button{min-height:44px;font-size:13px;gap:8px}
+  .composer-modal .form-grid{grid-template-columns:minmax(0,1fr);gap:12px;margin-bottom:12px}
+  .composer-modal .input-label{gap:8px;font-size:12px}
+  .composer-modal .input-label input,.composer-modal .input-label select{height:46px;padding:0 11px;font-size:16px}
+  .composer-modal .receipt-box{margin:8px 0 14px}
+  .composer-modal .receipt-select{min-height:66px;padding:12px}
+  .composer-modal .receipt-select strong{font-size:12px}
+  .composer-modal .receipt-select small{font-size:11px}
+  .composer-modal .receipt-preview{align-items:flex-start;gap:10px;padding:10px}
+  .composer-modal .receipt-preview img{width:56px;height:56px;flex:0 0 56px}
+  .composer-modal .receipt-preview strong,.composer-modal .receipt-preview span,.composer-modal .receipt-preview small,.composer-modal .receipt-preview button{font-size:11px;line-height:1.5}
+  .composer-modal .receipt-preview pre{font-size:12px}
+  .composer-modal .modal-footer{position:sticky;bottom:-16px;z-index:1;gap:8px;margin:12px -16px -16px;padding:12px 16px calc(10px + env(safe-area-inset-bottom));background:#fff}
+  .composer-modal .modal-footer>span{display:none}
+  .composer-modal .modal-footer .secondary-button,.composer-modal .modal-footer .primary-button{flex:1;height:46px;padding:0 10px;font-size:12px}
+  .composer-modal.allocation-modal{max-height:calc(100dvh - 88px - env(safe-area-inset-bottom))}
+  .composer-modal .allocation-edit-row{grid-template-columns:minmax(0,1fr);gap:12px;padding:12px}
+  .composer-modal .allocation-edit-row .icon-button{grid-column:auto;justify-self:end}
+  .composer-modal .allocation-tools{gap:8px}
+  .composer-modal .allocation-tools .secondary-button{min-height:42px}
+}

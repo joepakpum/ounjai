@@ -72,6 +72,21 @@ function bangkokDateKey(value = new Date()) {
   return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Bangkok', year: 'numeric', month: '2-digit', day: '2-digit' }).format(value)
 }
 
+function bangkokDateTimeKey(value) {
+  const parts = new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Bangkok', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' }).formatToParts(value)
+  const fields = Object.fromEntries(parts.filter((part) => part.type !== 'literal').map((part) => [part.type, part.value]))
+  return `${fields.year}-${fields.month}-${fields.day} ${fields.hour}:${fields.minute}:${fields.second}`
+}
+
+function localBangkokDateTime(value) {
+  const input = String(value)
+  if (/(?:Z|[+-]\d{2}:\d{2})$/i.test(input)) {
+    const instant = new Date(input)
+    return Number.isNaN(instant.getTime()) ? '' : bangkokDateTimeKey(instant)
+  }
+  return input.replace('T', ' ').slice(0, 19)
+}
+
 function validDateKey(value) {
   const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(value))
   if (!match) return false
@@ -1304,7 +1319,7 @@ async function handle(request, response) {
       if (body.edits && typeof body.edits === 'object') {
         const title = body.edits.title === undefined ? payload.title : String(body.edits.title).trim()
         const amount = body.edits.amount === undefined ? Number(payload.amount) : Number(body.edits.amount)
-        const occurredAt = body.edits.occurredAt === undefined ? payload.occurredAt : String(body.edits.occurredAt)
+        const occurredAt = body.edits.occurredAt === undefined ? payload.occurredAt : localBangkokDateTime(body.edits.occurredAt)
         if (!title || title.length > 160 || !Number.isFinite(amount) || amount <= 0 || Math.round(amount * 100) !== amount * 100 || !validLocalDateTime(occurredAt)) { await connection.rollback(); return send(response, 400, { error: 'กรุณาตรวจชื่อ ยอดเงิน และวันเวลาของรายการให้ถูกต้อง' }) }
         payload.title = title; payload.amount = amount; payload.occurredAt = occurredAt
       }
@@ -1609,7 +1624,7 @@ async function handle(request, response) {
     const title = String(body.title || '').trim()
     const clientRequestId = body.clientRequestId == null ? null : String(body.clientRequestId)
     const occurredAtInput = String(body.occurredAt || `${bangkokDateKey()}T12:00:00+07:00`)
-    const occurredAt = occurredAtInput.replace('T', ' ').replace(/(?:\+07:00|Z)$/, '').slice(0, 19)
+    const occurredAt = localBangkokDateTime(occurredAtInput)
     const requestedCategoryId = Number(body.categoryId) || null
     let category = String(body.category || '').trim()
     const requestedSourceAccountId = Number(body.sourceAccountId) || null
@@ -1809,7 +1824,7 @@ async function handle(request, response) {
         owner: body.owner === undefined ? row.owner_name : String(body.owner).trim(),
         payer: body.payer === undefined ? row.payer_name : String(body.payer).trim(),
         icon: body.icon === undefined ? row.icon : String(body.icon).slice(0, 12),
-        occurredAt: body.occurredAt === undefined ? String(row.occurred_at) : String(body.occurredAt).replace('T', ' ').slice(0, 19),
+        occurredAt: body.occurredAt === undefined ? String(row.occurred_at) : localBangkokDateTime(body.occurredAt),
         categoryId: body.categoryId === undefined ? (row.category_id == null ? null : Number(row.category_id)) : (Number(body.categoryId) || null),
         sourceAccountId: body.sourceAccountId === undefined ? (row.source_account_id == null ? null : Number(row.source_account_id)) : (Number(body.sourceAccountId) || null),
         destinationAccountId: body.destinationAccountId === undefined ? (row.destination_account_id == null ? null : Number(row.destination_account_id)) : (Number(body.destinationAccountId) || null),

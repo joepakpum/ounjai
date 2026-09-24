@@ -963,7 +963,7 @@ async function handle(request, response) {
       THEN DATE_ADD(DATE_ADD(DATE_FORMAT(CURDATE(), '%Y-%m-01'), INTERVAL b.cycle_start_day - 1 DAY), INTERVAL 1 MONTH)
       ELSE DATE_ADD(DATE_ADD(DATE_FORMAT(DATE_SUB(CURDATE(), INTERVAL 1 MONTH), '%Y-%m-01'), INTERVAL b.cycle_start_day - 1 DAY), INTERVAL 1 MONTH) END)
       OR (b.period_type = 'custom' AND DATE(t.occurred_at) BETWEEN b.period_start AND b.period_end))`
-    const budgetSpentScope = `t.scope = b.owner_type AND ((b.owner_type = 'user' AND t.created_by_user_id = b.owner_user_id) OR (b.owner_type = 'family' AND t.family_id = b.family_id))`
+    const budgetSpentScope = `((b.owner_type = 'user' AND t.scope = 'personal' AND t.created_by_user_id = b.owner_user_id) OR (b.owner_type = 'family' AND t.scope = 'family' AND t.family_id = b.family_id))`
     const [rows] = await pool.execute(`
       SELECT b.id, b.owner_type, b.owner_ref, b.category_id,
         b.amount + COALESCE((SELECT SUM(CASE WHEN bm.to_budget_id = b.id THEN bm.amount WHEN bm.from_budget_id = b.id THEN -bm.amount ELSE 0 END) FROM budget_movements bm WHERE bm.to_budget_id = b.id OR bm.from_budget_id = b.id), 0) AS amount,

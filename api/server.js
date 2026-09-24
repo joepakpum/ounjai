@@ -322,6 +322,26 @@ async function mapAuditSnapshotForUser(connection, value, user) {
   return snapshot
 }
 
+async function maskPrivateAccountReferences(connection, value, user) {
+  if (!value) return value
+  const record = typeof value === 'string' ? JSON.parse(value) : { ...value }
+  const familyId = record.familyId ?? record.family_id
+  const isFamilyRecord = record.scope === 'family' || familyId != null
+  const sourceIdKey = 'sourceAccountId' in record ? 'sourceAccountId' : 'source_account_id'
+  const destinationIdKey = 'destinationAccountId' in record ? 'destinationAccountId' : 'destination_account_id'
+  const ids = [...new Set([record[sourceIdKey], record[destinationIdKey]].filter((id) => id != null).map(Number))]
+  if (!isFamilyRecord || !ids.length) return record
+  const [accounts] = await connection.query(`SELECT id, owner_type, owner_user_id FROM money_accounts WHERE id IN (${ids.map(() => '?').join(',')})`, ids)
+  const privateIds = new Set(accounts.filter((account) => account.owner_type === 'user' && Number(account.owner_user_id) !== user.id).map((account) => Number(account.id)))
+  for (const [idKey, nameKey] of [[sourceIdKey, 'sourceAccount' in record ? 'sourceAccount' : 'source_account'], [destinationIdKey, 'destinationAccount' in record ? 'destinationAccount' : 'destination_account']]) {
+    if (privateIds.has(Number(record[idKey]))) {
+      record[idKey] = null
+      if (nameKey in record) record[nameKey] = 'บัญชีสมาชิก'
+    }
+  }
+  return record
+}
+
 async function getTransactionRecord(connection, id, lock = false) {
   const [rows] = await connection.execute(`
     SELECT t.*, u.display_name AS recorder_name FROM transactions t
@@ -645,7 +665,9 @@ async function handle(request, response) {
     const [transactions] = await pool.execute(`
       SELECT t.id, t.title, COALESCE(c.name, t.category) AS category, t.category_id, t.kind, t.amount, t.scope,
         t.family_id, t.created_by_user_id, t.updated_by_user_id, t.category_id,
-        t.source_account_id, t.destination_account_id, t.occurred_at, t.created_at, t.updated_at, t.deleted_at,
+        CASE WHEN t.scope = 'family' AND sa.owner_type = 'user' AND sa.owner_user_id <> ? THEN NULL ELSE t.source_account_id END AS source_account_id,
+        CASE WHEN t.scope = 'family' AND da.owner_type = 'user' AND da.owner_user_id <> ? THEN NULL ELSE t.destination_account_id END AS destination_account_id,
+        t.occurred_at, t.created_at, t.updated_at, t.deleted_at,
         CASE WHEN sa.owner_type = 'user' AND sa.owner_user_id <> ? THEN 'บัญชีสมาชิก' ELSE COALESCE(sa.name, t.source_account) END AS source_account,
         CASE WHEN da.owner_type = 'user' AND da.owner_user_id <> ? THEN 'บัญชีสมาชิก' ELSE COALESCE(da.name, t.destination_account) END AS destination_account,
         t.owner_name, t.payer_name, recorder.display_name AS recorder_name, updater.display_name AS updated_by, t.icon
@@ -656,7 +678,7 @@ async function handle(request, response) {
       LEFT JOIN users recorder ON recorder.id = t.created_by_user_id
       LEFT JOIN users updater ON updater.id = t.updated_by_user_id
       WHERE ${transactionWhere} ORDER BY t.occurred_at, t.id
-    `, [user.id, user.id, ...transactionParams])
+    `, [user.id, user.id, user.id, user.id, ...transactionParams])
     const [allocations] = await pool.execute(`
       SELECT a.id, a.transaction_id, a.category_id, c.name AS category, a.owner_user_id, a.owner_is_family, u.display_name AS owner_name, a.amount
       FROM transaction_allocations a JOIN transactions t ON t.id = a.transaction_id
@@ -680,6 +702,7 @@ async function handle(request, response) {
     `, [user.id, ...familyParams])
     const [recurringReviews] = await pool.execute(`
       SELECT rr.recurring_rule_id, rr.cycle_key, rr.review_date, rr.payload, rr.status, rr.reviewed_at,
+        r.owner_type, r.family_id,
         rr.created_at, reviewer.display_name AS reviewed_by
       FROM recurring_reviews rr JOIN recurring_rules r ON r.id = rr.recurring_rule_id
       LEFT JOIN users reviewer ON reviewer.id = rr.reviewed_by_user_id
@@ -693,11 +716,24 @@ async function handle(request, response) {
       WHERE (family_id IS NULL AND owner_user_id = ?) OR family_id IN (${familyPlaceholders})
       ORDER BY created_at, id
     `, [user.id, ...familyParams])
+    const safeHistory = await Promise.all(history.map(async (entry) => ({
+      ...entry,
+      before_snapshot: await mapAuditSnapshotForUser(pool, entry.before_snapshot, user),
+      after_snapshot: await mapAuditSnapshotForUser(pool, entry.after_snapshot, user),
+    })))
+    const safeRecurringRules = await Promise.all(recurringRules.map((rule) => maskPrivateAccountReferences(pool, rule, user)))
+    const safeRecurringReviews = await Promise.all(recurringReviews.map(async (review) => {
+      const payload = typeof review.payload === 'string' ? JSON.parse(review.payload) : { ...review.payload }
+      payload.scope = review.owner_type === 'family' ? 'family' : 'personal'
+      payload.familyId = review.family_id == null ? null : Number(review.family_id)
+      return { ...review, payload: await maskPrivateAccountReferences(pool, payload, user) }
+    }))
     const exportData = {
       format: 'ounjai-account-export-v1', generatedAt: new Date().toISOString(),
       profile: { id: Number(profile.id), email: profile.email, displayName: profile.display_name, emailVerifiedAt: profile.email_verified_at, createdAt: profile.created_at },
       memberships, accounts: accounts.map((account) => ({ ...account, id: Number(account.id), ownerUserId: account.owner_user_id == null ? null : Number(account.owner_user_id), familyId: account.family_id == null ? null : Number(account.family_id), openingBalance: Number(account.opening_balance), balance: Number(account.balance) })),
-      categories, budgets, budgetMovements, transactions, allocations, history, recurringRules, recurringReviews, receipts,
+      categories, budgets, budgetMovements, transactions, allocations, history: safeHistory,
+      recurringRules: safeRecurringRules, recurringReviews: safeRecurringReviews, receipts,
     }
     const date = new Date().toISOString().slice(0, 10)
     return send(response, 200, exportData, { 'content-disposition': `attachment; filename="ounjai-data-export-${date}.json"` })
@@ -1134,7 +1170,8 @@ async function handle(request, response) {
       WHERE r.owner_type = ? AND r.owner_ref = ? AND (r.owner_type = 'family' OR r.created_by_user_id = ?)
       ORDER BY r.created_at DESC
     `, [scope === 'family' ? 'family' : 'user', scope === 'family' ? familyId : user.id, user.id])
-    return send(response, 200, rules.map((rule) => ({ id: Number(rule.id), scope, familyId: rule.family_id == null ? null : Number(rule.family_id), kind: rule.kind, title: rule.title, categoryId: rule.category_id == null ? null : Number(rule.category_id), category: rule.category_name, amount: Number(rule.amount), sourceAccountId: Number(rule.source_account_id), destinationAccountId: rule.destination_account_id == null ? null : Number(rule.destination_account_id), owner: rule.owner_name, payer: rule.payer_name, frequency: rule.frequency, intervalCount: Number(rule.interval_count), dayOfMonth: rule.day_of_month == null ? null : Number(rule.day_of_month), startsOn: rule.starts_on, endsOn: rule.ends_on, paused: Boolean(rule.paused_at), createdBy: rule.creator_name, canManage: canManageRecurringRule(user, rule) })))
+    const safeRules = await Promise.all(rules.map(async (rule) => maskPrivateAccountReferences(pool, { id: Number(rule.id), scope, familyId: rule.family_id == null ? null : Number(rule.family_id), kind: rule.kind, title: rule.title, categoryId: rule.category_id == null ? null : Number(rule.category_id), category: rule.category_name, amount: Number(rule.amount), sourceAccountId: Number(rule.source_account_id), destinationAccountId: rule.destination_account_id == null ? null : Number(rule.destination_account_id), owner: rule.owner_name, payer: rule.payer_name, frequency: rule.frequency, intervalCount: Number(rule.interval_count), dayOfMonth: rule.day_of_month == null ? null : Number(rule.day_of_month), startsOn: rule.starts_on, endsOn: rule.ends_on, paused: Boolean(rule.paused_at), createdBy: rule.creator_name, canManage: canManageRecurringRule(user, rule) }, user)))
+    return send(response, 200, safeRules)
   }
 
   if (pathname === '/api/recurring-rules' && method === 'POST') {
@@ -1191,7 +1228,13 @@ async function handle(request, response) {
       WHERE r.owner_type = ? AND r.owner_ref = ? AND rr.status = 'pending' AND (r.owner_type = 'family' OR r.created_by_user_id = ?)
       ORDER BY rr.review_date, rr.id
     `, [ownerType, ownerRef, user.id])
-    return send(response, 200, reviews.map((review) => ({ id: Number(review.id), cycleKey: review.cycle_key, reviewDate: review.review_date, transaction: typeof review.payload === 'string' ? JSON.parse(review.payload) : review.payload, createdBy: review.creator_name, canManage: canManageRecurringRule(user, { ...review, owner_type: review.owner_type, owner_ref: review.owner_ref }) })))
+    const safeReviews = await Promise.all(reviews.map(async (review) => {
+      const payload = typeof review.payload === 'string' ? JSON.parse(review.payload) : { ...review.payload }
+      payload.scope = scope
+      payload.familyId = scope === 'family' ? familyId : null
+      return { id: Number(review.id), cycleKey: review.cycle_key, reviewDate: review.review_date, transaction: await maskPrivateAccountReferences(pool, payload, user), createdBy: review.creator_name, canManage: canManageRecurringRule(user, { ...review, owner_type: review.owner_type, owner_ref: review.owner_ref }) }
+    }))
+    return send(response, 200, safeReviews)
   }
 
   const recurringRuleRoute = pathname.match(/^\/api\/recurring-rules\/(\d+)$/)

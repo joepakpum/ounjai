@@ -94,6 +94,8 @@ function App() {
   const [formOwner, setFormOwner] = useState('')
   const [formPayer, setFormPayer] = useState('')
   const fileInput = useRef<HTMLInputElement>(null)
+  const receiptUploadSequence = useRef(0)
+  const manuallyEditedReceiptFields = useRef({ title: false, amount: false, date: false, category: false })
 
   useEffect(() => {
     let active = true
@@ -294,6 +296,8 @@ function App() {
   }
 
   function openComposer(kind: Kind = 'expense') {
+    receiptUploadSequence.current += 1
+    manuallyEditedReceiptFields.current = { title: false, amount: false, date: false, category: false }
     setEditingTransactionId(null)
     setClientRequestId(crypto.randomUUID())
     setFormKind(kind); setFormScope(scope === 'family' && authUser?.families.length ? 'family' : 'personal'); setFormCategory(kind === 'income' ? 'เงินเดือน' : 'อาหาร')
@@ -301,6 +305,8 @@ function App() {
   }
 
   function editTransaction(item: Transaction) {
+    receiptUploadSequence.current += 1
+    manuallyEditedReceiptFields.current = { title: true, amount: true, date: true, category: true }
     setEditingTransactionId(item.id)
     setFormKind(item.kind); setFormScope(item.scope); setFormCategory(item.category)
     setFormAmount(String(item.amount)); setFormTitle(item.title)
@@ -317,11 +323,24 @@ function App() {
     setToast(message); window.setTimeout(() => setToast(''), 2800)
   }
 
+  function changeFormScope(nextScope: Scope) {
+    if (!authUser || formScope === nextScope) return
+    receiptUploadSequence.current += 1
+    if (receiptId) void fetch(`/api/receipts/${receiptId}`, { method: 'DELETE', headers: { 'content-type': 'application/json' }, body: '{}' })
+    const hadReceipt = Boolean(receiptId || selectedReceipt || filePreview)
+    if (filePreview) URL.revokeObjectURL(filePreview)
+    setReceiptId(null); setSelectedReceipt(null); setFilePreview(''); setReceiptSuggestion(null)
+    setFormScope(nextScope); setFormAccountId(''); setFormDestinationId(''); setFormOwner(authUser.displayName); setFormPayer(authUser.displayName)
+    if (hadReceipt) notify('ขอบเขตเปลี่ยนแล้ว กรุณาเลือกภาพใหม่เพื่อให้สิทธิ์ภาพตรงกับรายการ')
+  }
+
   function handleImage(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0]
     if (!file) return
     if (file.size > 6 * 1024 * 1024) { notify('เลือกภาพขนาดไม่เกิน 6 MB'); event.target.value = ''; return }
     if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type)) { notify('รองรับภาพ JPEG, PNG หรือ WebP'); event.target.value = ''; return }
+    const uploadSequence = ++receiptUploadSequence.current
+    event.target.value = ''
     if (receiptId) void fetch(`/api/receipts/${receiptId}`, { method: 'DELETE', headers: { 'content-type': 'application/json' }, body: '{}' })
     setReceiptId(null)
     if (filePreview) URL.revokeObjectURL(filePreview)
@@ -332,26 +351,36 @@ function App() {
         const response = await fetch('/api/receipts', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ fileName: file.name, mimeType: file.type, data: reader.result, scope: formScope, familyId: formScope === 'family' ? activeFamilyId : undefined }) })
         const result = await response.json() as { id?: number; extracted?: ReceiptSuggestion; ocrAvailable?: boolean; error?: string }
         if (!response.ok || !result.id) throw new Error(result.error || 'อัปโหลดและอ่านภาพไม่สำเร็จ')
+        if (uploadSequence !== receiptUploadSequence.current) {
+          await fetch(`/api/receipts/${result.id}`, { method: 'DELETE', headers: { 'content-type': 'application/json' }, body: '{}' }).catch(() => {})
+          return
+        }
         setReceiptId(result.id); setReceiptSuggestion(result.extracted || null); setReceiptOcrAvailable(Boolean(result.ocrAvailable))
-        if (result.extracted?.merchant && !formTitle) setFormTitle(result.extracted.merchant)
-        if (result.extracted?.amount && !formAmount) setFormAmount(String(result.extracted.amount))
-        if (result.extracted?.date) setFormDate(result.extracted.date)
-        if (result.extracted?.category) {
+        if (result.extracted?.merchant && !manuallyEditedReceiptFields.current.title) setFormTitle(result.extracted.merchant)
+        if (result.extracted?.amount && !manuallyEditedReceiptFields.current.amount) setFormAmount(String(result.extracted.amount))
+        if (result.extracted?.date && !manuallyEditedReceiptFields.current.date) setFormDate(result.extracted.date)
+        if (result.extracted?.category && !manuallyEditedReceiptFields.current.category) {
           const category = formCategories.find((item) => item.name === result.extracted?.category)
           if (category) { setFormCategory(category.name); setFormCategoryId(String(category.id)) }
         }
         if (!result.ocrAvailable) notify('บันทึกภาพแล้ว แต่บริการ OCR ยังไม่พร้อม กรุณากรอกข้อมูลตรวจสอบเอง')
         else if (!result.extracted?.rawText) notify('สแกนภาพแล้วแต่ยังอ่านข้อมูลไม่ได้ กรุณากรอกข้อมูลเอง')
-      } catch (error) { notify(error instanceof Error ? error.message : 'อัปโหลดภาพไม่สำเร็จ'); setSelectedReceipt(null); setFilePreview('') }
+      } catch (error) {
+        if (uploadSequence !== receiptUploadSequence.current) return
+        notify(error instanceof Error ? error.message : 'อัปโหลดภาพไม่สำเร็จ'); setSelectedReceipt(null); setFilePreview('')
+      }
     }
-    reader.onerror = () => notify('อ่านไฟล์ภาพไม่สำเร็จ')
+    reader.onerror = () => { if (uploadSequence === receiptUploadSequence.current) notify('อ่านไฟล์ภาพไม่สำเร็จ') }
     reader.readAsDataURL(file)
   }
 
   async function closeComposer(preserveReceipt = false) {
-    if (receiptId && !preserveReceipt) await fetch(`/api/receipts/${receiptId}`, { method: 'DELETE', headers: { 'content-type': 'application/json' }, body: '{}' }).catch(() => {})
-    if (filePreview) URL.revokeObjectURL(filePreview)
+    receiptUploadSequence.current += 1
+    const receiptToDelete = !preserveReceipt ? receiptId : null
+    const previewToRevoke = filePreview
     setModal(false); setSelectedReceipt(null); setReceiptId(null); setReceiptSuggestion(null); setFilePreview('')
+    if (previewToRevoke) URL.revokeObjectURL(previewToRevoke)
+    if (receiptToDelete) await fetch(`/api/receipts/${receiptToDelete}`, { method: 'DELETE', headers: { 'content-type': 'application/json' }, body: '{}' }).catch(() => {})
   }
 
   async function saveTransaction(event: FormEvent<HTMLFormElement>) {
@@ -774,10 +803,10 @@ function App() {
       <button className="mobile-add" onClick={() => openComposer('expense')}><Plus size={22}/></button>
 
       {modal && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) void closeComposer() }}><div className="composer-modal" role="dialog" aria-modal="true" aria-labelledby="composer-title"><div className="modal-heading"><div><div className="modal-kicker">{editingTransactionId ? 'แก้ไขรายการ' : 'เพิ่มรายการใหม่'}</div><h2 id="composer-title">{editingTransactionId ? 'ปรับข้อมูลการเงิน' : 'บันทึกการเงิน'}</h2></div><button className="icon-button" onClick={() => void closeComposer()} aria-label="ปิด"><X size={19}/></button></div><div className="kind-tabs">{([{key:'expense',label:'รายจ่าย',icon:<ArrowUpRight size={15}/>},{key:'income',label:'รายรับ',icon:<ArrowDownRight size={15}/>},{key:'transfer',label:'โอนเงิน',icon:<ArrowLeftRight size={15}/>} ] as const).map((item) => <button key={item.key} type="button" className={formKind === item.key ? `${item.key} active` : ''} onClick={() => { setFormKind(item.key); setFormCategory(item.key === 'income' ? 'เงินเดือน' : 'อาหาร') }}>{item.icon}{item.label}</button>)}</div><form onSubmit={saveTransaction}>
-        <div className="amount-field"><label htmlFor="amount">จำนวนเงิน</label><div><span>฿</span><input id="amount" inputMode="decimal" value={formAmount} onChange={(event) => setFormAmount(event.target.value)} placeholder="0.00" required /></div></div>
-        <div className="form-grid"><label className="input-label">วันที่รายการ<input type="date" value={formDate} onChange={(event) => setFormDate(event.target.value)} required/></label></div>
-        <div className="form-row"><label>ขอบเขต</label><div className="scope-options"><button type="button" disabled={!authUser.families.length} className={formScope === 'family' ? 'chosen' : ''} onClick={() => { setFormScope('family'); setFormAccountId(''); setFormDestinationId(''); setFormOwner(authUser.displayName); setFormPayer(authUser.displayName) }}><Users size={15}/> ครอบครัว</button><button type="button" className={formScope === 'personal' ? 'chosen' : ''} onClick={() => { setFormScope('personal'); setFormAccountId(''); setFormDestinationId(''); setFormOwner(authUser.displayName); setFormPayer(authUser.displayName) }}><Wallet size={15}/> ส่วนตัว</button></div></div>
-        <div className={`form-grid ${formKind === 'transfer' ? 'single' : ''}`}><label className="input-label">{formKind === 'income' ? 'ที่มาของรายรับ' : formKind === 'transfer' ? 'รายละเอียดการโอน' : 'ชื่อรายการ'}<input value={formTitle} onChange={(event) => setFormTitle(event.target.value)} placeholder={formKind === 'income' ? 'เช่น เงินเดือน' : formKind === 'transfer' ? 'เช่น โอนให้แม่' : 'เช่น ซื้อของเข้าบ้าน'} /></label>{formKind !== 'transfer' && <label className="input-label">หมวดหมู่<select value={formCategoryId} onChange={(event) => { setFormCategoryId(event.target.value); setFormCategory(formCategories.find((category) => String(category.id) === event.target.value)?.name || '') }} required><option value="">เลือกหมวดหมู่</option>{formCategories.map((category) => <option key={category.id} value={category.id}>{category.icon} {category.name}</option>)}</select></label>}</div>
+        <div className="amount-field"><label htmlFor="amount">จำนวนเงิน</label><div><span>฿</span><input id="amount" inputMode="decimal" value={formAmount} onChange={(event) => { manuallyEditedReceiptFields.current.amount = true; setFormAmount(event.target.value) }} placeholder="0.00" required /></div></div>
+        <div className="form-grid"><label className="input-label">วันที่รายการ<input type="date" value={formDate} onChange={(event) => { manuallyEditedReceiptFields.current.date = true; setFormDate(event.target.value) }} required/></label></div>
+        <div className="form-row"><label>ขอบเขต</label><div className="scope-options"><button type="button" disabled={!authUser.families.length} className={formScope === 'family' ? 'chosen' : ''} onClick={() => changeFormScope('family')}><Users size={15}/> ครอบครัว</button><button type="button" className={formScope === 'personal' ? 'chosen' : ''} onClick={() => changeFormScope('personal')}><Wallet size={15}/> ส่วนตัว</button></div></div>
+        <div className={`form-grid ${formKind === 'transfer' ? 'single' : ''}`}><label className="input-label">{formKind === 'income' ? 'ที่มาของรายรับ' : formKind === 'transfer' ? 'รายละเอียดการโอน' : 'ชื่อรายการ'}<input value={formTitle} onChange={(event) => { manuallyEditedReceiptFields.current.title = true; setFormTitle(event.target.value) }} placeholder={formKind === 'income' ? 'เช่น เงินเดือน' : formKind === 'transfer' ? 'เช่น โอนให้แม่' : 'เช่น ซื้อของเข้าบ้าน'} /></label>{formKind !== 'transfer' && <label className="input-label">หมวดหมู่<select value={formCategoryId} onChange={(event) => { manuallyEditedReceiptFields.current.category = true; setFormCategoryId(event.target.value); setFormCategory(formCategories.find((category) => String(category.id) === event.target.value)?.name || '') }} required><option value="">เลือกหมวดหมู่</option>{formCategories.map((category) => <option key={category.id} value={category.id}>{category.icon} {category.name}</option>)}</select></label>}</div>
         {formKind === 'transfer' ? <div className="form-grid"><label className="input-label">บัญชีต้นทาง<select value={formAccountId} onChange={(event) => { const account = formAccounts.find((item) => String(item.id) === event.target.value); setFormAccountId(event.target.value); setFormAccount(account?.name || '') }} required><option value="">เลือกบัญชีต้นทาง</option>{formAccounts.map((account) => <option key={account.id} value={account.id}>{account.name} · {account.ownerType === 'family' ? 'ครอบครัว' : 'ส่วนตัว'}</option>)}</select></label><label className="input-label">บัญชีปลายทาง<select value={formDestinationId} onChange={(event) => { const account = formAccounts.find((item) => String(item.id) === event.target.value); const recipient = transferRecipientAccounts.find((item) => String(item.id) === event.target.value); setFormDestinationId(event.target.value); setFormDestination(account?.name || (recipient ? `${recipient.ownerName} · ${recipient.accountType === 'cash' ? 'เงินสด' : recipient.accountType === 'bank' ? 'บัญชีธนาคาร' : 'บัญชีอื่น'}` : '')) }} required><option value="">เลือกบัญชีปลายทาง</option>{formAccounts.filter((account) => String(account.id) !== formAccountId).map((account) => <option key={account.id} value={account.id}>{account.name} · {account.ownerType === 'family' ? 'ครอบครัว' : 'ส่วนตัว'}</option>)}{formScope === 'family' && transferRecipientAccounts.map((account) => <option key={account.id} value={account.id}>{account.ownerName} · {account.accountType === 'cash' ? 'เงินสด' : account.accountType === 'bank' ? 'บัญชีธนาคาร' : 'บัญชีอื่น'}</option>)}</select></label></div> : <><div className="form-grid"><label className="input-label">{formKind === 'income' ? 'บัญชีรับเงิน' : 'บัญชีจ่ายเงิน'}<select value={formAccountId} onChange={(event) => { const account = formAccounts.find((item) => String(item.id) === event.target.value); setFormAccountId(event.target.value); setFormAccount(account?.name || '') }} required><option value="">เลือกบัญชีเงิน</option>{formAccounts.map((account) => <option key={account.id} value={account.id}>{account.name} · {account.ownerType === 'family' ? 'ครอบครัว' : 'ส่วนตัว'}</option>)}</select></label>{formKind === 'expense' && <label className="input-label">ผู้จ่าย<select value={formPayer} onChange={(event) => setFormPayer(event.target.value)}><option>{authUser.displayName}</option>{formScope === 'family' && <><option>ครอบครัว</option>{familyInfo.find((family) => family.id === activeFamilyId)?.members.filter((member) => member.displayName !== authUser.displayName).map((member) => <option key={member.id}>{member.displayName}</option>)}</>}</select></label>}</div><div className="form-grid"><label className="input-label">เจ้าของรายการ<select value={formOwner} onChange={(event) => setFormOwner(event.target.value)}><option>{authUser.displayName}</option>{formScope === 'family' && <><option>ครอบครัว</option>{familyInfo.find((family) => family.id === activeFamilyId)?.members.filter((member) => member.displayName !== authUser.displayName).map((member) => <option key={member.id}>{member.displayName}</option>)}</>}</select></label></div></>}
         {formKind === 'expense' && <div className="receipt-box">{filePreview ? <div className="receipt-preview"><img src={filePreview} alt="ภาพสลิปที่เลือก"/><div><strong><Sparkles size={14}/> {receiptId ? (receiptOcrAvailable ? 'ผลสแกนจากภาพ · โปรดตรวจสอบ' : 'บันทึกภาพแล้ว · กรอกข้อมูลเอง') : 'กำลังอัปโหลดและสแกนภาพ…'}</strong><span>{receiptSuggestion?.merchant || selectedReceipt?.name || 'ไม่พบชื่อร้าน'}{receiptSuggestion?.amount ? ` · ฿${formatMoney(receiptSuggestion.amount)}` : ''}{receiptSuggestion?.date ? ` · ${receiptSuggestion.date}` : ''}</span>{receiptSuggestion?.category && <small>หมวดที่แนะนำ: {receiptSuggestion.category}</small>}{receiptSuggestion?.rawText && <details><summary>อ่านข้อความจากสลิป</summary><pre>{receiptSuggestion.rawText}</pre></details>}<button type="button" onClick={() => fileInput.current?.click()}>เลือกภาพอื่น</button></div></div> : <button type="button" className="receipt-select" onClick={() => fileInput.current?.click()}><span className="receipt-icon"><FileImage size={19}/></span><span><strong>แนบสลิปหรือใบเสร็จ</strong><small>เลือกภาพจากคลังหรือถ่ายภาพ · สูงสุด 6 MB</small></span><Upload size={16}/></button>}<input ref={fileInput} type="file" accept="image/jpeg,image/png,image/webp" capture="environment" hidden onChange={handleImage}/></div>}
         <div className="modal-footer"><span><CircleHelp size={14}/> ผู้บันทึก: {authUser.displayName}</span><button type="button" className="secondary-button" onClick={() => void closeComposer()}>ยกเลิก</button><button type="submit" className="primary-button" disabled={Boolean(selectedReceipt && !receiptId)}><Check size={16}/>{editingTransactionId ? 'บันทึกการแก้ไข' : 'บันทึกรายการ'}</button></div>

@@ -77,7 +77,7 @@ function sessionCookie(value, maxAge = sessionDays * 24 * 60 * 60) {
 
 function checkOrigin(request) {
   const origin = request.headers.origin
-  let matches = !origin
+  let matches = false
   try { if (origin) matches = new URL(origin).origin === new URL(appBaseUrl).origin } catch { matches = false }
   if (!matches) {
     const error = new Error('คำขอมาจากเว็บไซต์ที่ไม่อนุญาต')
@@ -195,6 +195,40 @@ function mapTransaction(row) {
     owner: row.owner_name, payer: row.payer_name || undefined,
     recorder: row.recorder_name, icon: row.icon,
   }
+}
+
+function transactionSnapshot(row) {
+  if (!row) return null
+  return {
+    id: Number(row.id), title: row.title, category: row.category, kind: row.kind,
+    amount: String(row.amount), scope: row.scope, occurredAt: row.occurred_at,
+    sourceAccount: row.source_account, destinationAccount: row.destination_account,
+    owner: row.owner_name, payer: row.payer_name, recorder: row.recorder_name,
+    icon: row.icon, createdByUserId: Number(row.created_by_user_id),
+    familyId: row.family_id == null ? null : Number(row.family_id),
+    deletedAt: row.deleted_at, updatedByUserId: row.updated_by_user_id == null ? null : Number(row.updated_by_user_id),
+  }
+}
+
+async function getTransactionRecord(connection, id, lock = false) {
+  const [rows] = await connection.execute(`
+    SELECT t.*, u.display_name AS recorder_name FROM transactions t
+    LEFT JOIN users u ON u.id = t.created_by_user_id WHERE t.id = ? ${lock ? 'FOR UPDATE' : ''}
+  `, [id])
+  return rows[0] || null
+}
+
+function canManageTransaction(user, row) {
+  if (row.scope === 'personal') return Number(row.created_by_user_id) === user.id
+  const membership = user.families.find((family) => family.id === Number(row.family_id))
+  return Boolean(membership && (membership.role === 'owner' || Number(row.created_by_user_id) === user.id))
+}
+
+async function auditTransaction(connection, transactionId, userId, action, before, after) {
+  await connection.execute(`
+    INSERT INTO transaction_audit_logs (transaction_id, actor_user_id, action, before_snapshot, after_snapshot)
+    VALUES (?, ?, ?, ?, ?)
+  `, [transactionId, userId, action, before ? JSON.stringify(before) : null, after ? JSON.stringify(after) : null])
 }
 
 async function handle(request, response) {
@@ -489,6 +523,7 @@ async function handle(request, response) {
   if (method === 'GET' && pathname === '/api/transactions') {
     const user = await currentUser(request)
     if (!user) return send(response, 401, { error: 'กรุณาเข้าสู่ระบบ' })
+    const includeTrash = url.searchParams.get('trash') === 'true'
     const requestedFamily = Number(url.searchParams.get('familyId'))
     const selectedFamily = requestedFamily || user.families[0]?.id || 0
     const [rows] = await pool.execute(`
@@ -497,13 +532,20 @@ async function handle(request, response) {
              u.display_name AS recorder_name, t.icon
       FROM transactions t
       LEFT JOIN users u ON u.id = t.created_by_user_id
-      WHERE (t.scope = 'personal' AND t.created_by_user_id = ?)
+      WHERE ((t.scope = 'personal' AND t.created_by_user_id = ?)
          OR (t.scope = 'family' AND t.family_id IN (
            SELECT family_id FROM family_members WHERE user_id = ? AND left_at IS NULL
              AND family_id = ?
-         ))
+         )))
+      ${includeTrash ? `AND t.deleted_at IS NOT NULL AND (
+        t.created_by_user_id = ? OR EXISTS (
+          SELECT 1 FROM family_members owner_membership
+          WHERE owner_membership.family_id = t.family_id AND owner_membership.user_id = ?
+            AND owner_membership.left_at IS NULL AND owner_membership.role = 'owner'
+        )
+      )` : 'AND t.deleted_at IS NULL'}
       ORDER BY t.occurred_at DESC, t.id DESC LIMIT 500
-    `, [user.id, user.id, selectedFamily])
+    `, includeTrash ? [user.id, user.id, selectedFamily, user.id, user.id] : [user.id, user.id, selectedFamily])
     return send(response, 200, rows.map(mapTransaction))
   }
 
@@ -545,19 +587,105 @@ async function handle(request, response) {
     }
     if (!permittedNames.includes(owner)) return send(response, 403, { error: 'เจ้าของรายการต้องเป็นสมาชิกที่ยังอยู่ในขอบเขตนี้' })
     if (payer && !permittedNames.includes(payer)) return send(response, 403, { error: 'ผู้จ่ายต้องเป็นสมาชิกที่ยังอยู่ในขอบเขตนี้' })
-    const [result] = await pool.execute(`
-      INSERT INTO transactions
-        (title, category, kind, amount, scope, occurred_at, source_account,
-         destination_account, owner_name, payer_name, recorder_name, icon, created_by_user_id, family_id)
-      VALUES (?, ?, ?, ?, ?, NOW(), ?, ?, ?, ?, ?, ?, ?, ?)
-    `, [title, category, kind, amount, scope, sourceAccount, destinationAccount, owner, payer || null, user.displayName, icon, user.id, familyId])
-    const [rows] = await pool.execute(`
-      SELECT t.id, t.title, t.category, t.kind, t.amount, t.scope, t.occurred_at,
-             t.source_account, t.destination_account, t.owner_name, t.payer_name,
-             u.display_name AS recorder_name, t.icon
-      FROM transactions t JOIN users u ON u.id = t.created_by_user_id WHERE t.id = ?
-    `, [result.insertId])
-    return send(response, 201, mapTransaction(rows[0]))
+    const connection = await pool.getConnection()
+    try {
+      await connection.beginTransaction()
+      const [result] = await connection.execute(`
+        INSERT INTO transactions
+          (title, category, kind, amount, scope, occurred_at, source_account,
+           destination_account, owner_name, payer_name, recorder_name, icon, created_by_user_id, family_id)
+        VALUES (?, ?, ?, ?, ?, NOW(), ?, ?, ?, ?, ?, ?, ?, ?)
+      `, [title, category, kind, amount, scope, sourceAccount, destinationAccount, owner, payer || null, user.displayName, icon, user.id, familyId])
+      const row = await getTransactionRecord(connection, result.insertId)
+      await auditTransaction(connection, result.insertId, user.id, 'created', null, transactionSnapshot(row))
+      await connection.commit()
+      return send(response, 201, mapTransaction(row))
+    } catch (error) { await connection.rollback(); throw error } finally { connection.release() }
+  }
+
+  const transactionHistoryRoute = pathname.match(/^\/api\/transactions\/(\d+)\/history$/)
+  if (method === 'GET' && transactionHistoryRoute) {
+    const user = await currentUser(request)
+    if (!user) return send(response, 401, { error: 'กรุณาเข้าสู่ระบบ' })
+    const connection = await pool.getConnection()
+    try {
+      const row = await getTransactionRecord(connection, Number(transactionHistoryRoute[1]))
+      if (!row || !canManageTransaction(user, row) && !(row.scope === 'family' && user.families.some((family) => family.id === Number(row.family_id)))) return send(response, 404, { error: 'ไม่พบรายการ' })
+      const [history] = await connection.execute(`
+        SELECT a.id, a.action, a.before_snapshot, a.after_snapshot, a.created_at, u.display_name AS actor_name
+        FROM transaction_audit_logs a JOIN users u ON u.id = a.actor_user_id
+        WHERE a.transaction_id = ? ORDER BY a.created_at DESC, a.id DESC
+      `, [row.id])
+      return send(response, 200, history.map((entry) => ({ id: Number(entry.id), action: entry.action, before: entry.before_snapshot, after: entry.after_snapshot, actor: entry.actor_name, createdAt: entry.created_at })))
+    } finally { connection.release() }
+  }
+
+  const transactionRoute = pathname.match(/^\/api\/transactions\/(\d+)(?:\/(restore))?$/)
+  if (transactionRoute && (method === 'PATCH' || method === 'DELETE' || method === 'POST' && transactionRoute[2] === 'restore')) {
+    const user = await currentUser(request)
+    if (!user) return send(response, 401, { error: 'กรุณาเข้าสู่ระบบ' })
+    const transactionId = Number(transactionRoute[1])
+    const connection = await pool.getConnection()
+    try {
+      await connection.beginTransaction()
+      const row = await getTransactionRecord(connection, transactionId, true)
+      if (!row || !canManageTransaction(user, row)) {
+        await connection.rollback()
+        return send(response, 404, { error: 'ไม่พบรายการหรือคุณไม่มีสิทธิ์จัดการรายการนี้' })
+      }
+      if (method === 'DELETE') {
+        if (row.deleted_at) { await connection.rollback(); return send(response, 409, { error: 'รายการอยู่ในถังขยะแล้ว' }) }
+        const before = transactionSnapshot(row)
+        await connection.execute('UPDATE transactions SET deleted_at = UTC_TIMESTAMP(), updated_by_user_id = ? WHERE id = ?', [user.id, transactionId])
+        const after = transactionSnapshot(await getTransactionRecord(connection, transactionId))
+        await auditTransaction(connection, transactionId, user.id, 'trashed', before, after)
+        await connection.commit()
+        return send(response, 200, { ok: true })
+      }
+      if (transactionRoute[2] === 'restore') {
+        if (!row.deleted_at) { await connection.rollback(); return send(response, 409, { error: 'รายการนี้ไม่ได้อยู่ในถังขยะ' }) }
+        const before = transactionSnapshot(row)
+        await connection.execute('UPDATE transactions SET deleted_at = NULL, updated_by_user_id = ? WHERE id = ?', [user.id, transactionId])
+        const after = transactionSnapshot(await getTransactionRecord(connection, transactionId))
+        await auditTransaction(connection, transactionId, user.id, 'restored', before, after)
+        await connection.commit()
+        return send(response, 200, { ok: true, transaction: mapTransaction(await getTransactionRecord(pool, transactionId)) })
+      }
+      if (row.deleted_at) { await connection.rollback(); return send(response, 409, { error: 'กู้คืนรายการก่อนแก้ไข' }) }
+      const body = await readJson(request)
+      const values = {
+        title: body.title === undefined ? row.title : String(body.title).trim(),
+        category: body.category === undefined ? row.category : String(body.category).trim(),
+        kind: body.kind === undefined ? row.kind : body.kind,
+        amount: body.amount === undefined ? Number(row.amount) : Number(body.amount),
+        sourceAccount: body.sourceAccount === undefined ? row.source_account : String(body.sourceAccount).trim(),
+        destinationAccount: body.destinationAccount === undefined ? row.destination_account : String(body.destinationAccount).trim(),
+        owner: body.owner === undefined ? row.owner_name : String(body.owner).trim(),
+        payer: body.payer === undefined ? row.payer_name : String(body.payer).trim(),
+        icon: body.icon === undefined ? row.icon : String(body.icon).slice(0, 12),
+        occurredAt: body.occurredAt === undefined ? String(row.occurred_at) : String(body.occurredAt).replace('T', ' ').slice(0, 19),
+      }
+      if (!['income', 'expense', 'transfer'].includes(values.kind)) { await connection.rollback(); return send(response, 400, { error: 'ประเภทรายการไม่ถูกต้อง' }) }
+      if (!Number.isFinite(values.amount) || values.amount <= 0 || Math.round(values.amount * 100) !== values.amount * 100) { await connection.rollback(); return send(response, 400, { error: 'จำนวนเงินต้องมากกว่าศูนย์และไม่เกินสองตำแหน่งทศนิยม' }) }
+      if (!values.title || values.title.length > 160 || !values.category || values.category.length > 80 || !values.sourceAccount || values.sourceAccount.length > 100) { await connection.rollback(); return send(response, 400, { error: 'กรอกข้อมูลรายการให้ครบและอยู่ในความยาวที่กำหนด' }) }
+      if (values.owner.length > 100 || values.payer?.length > 100) { await connection.rollback(); return send(response, 400, { error: 'ชื่อผู้เกี่ยวข้องยาวเกินกำหนด' }) }
+      if (values.kind === 'transfer' && (!values.destinationAccount || values.destinationAccount.length > 100 || values.destinationAccount === values.sourceAccount)) { await connection.rollback(); return send(response, 400, { error: 'เลือกบัญชีต้นทางและปลายทางให้ต่างกัน' }) }
+      if (!/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(values.occurredAt) || Number.isNaN(new Date(`${values.occurredAt.replace(' ', 'T')}+07:00`).getTime())) { await connection.rollback(); return send(response, 400, { error: 'วันที่รายการไม่ถูกต้อง' }) }
+      const permittedNames = row.scope === 'personal' ? [user.displayName] : [
+        ...(await connection.execute(`SELECT u.display_name FROM family_members fm JOIN users u ON u.id = fm.user_id WHERE fm.family_id = ? AND fm.left_at IS NULL`, [row.family_id]))[0].map((member) => member.display_name), row.owner_name, row.payer_name, 'ครอบครัว',
+      ]
+      if (!permittedNames.includes(values.owner) || values.payer && !permittedNames.includes(values.payer)) { await connection.rollback(); return send(response, 403, { error: 'เจ้าของรายการและผู้จ่ายต้องอยู่ในขอบเขตนี้' }) }
+      const before = transactionSnapshot(row)
+      await connection.execute(`
+        UPDATE transactions SET title = ?, category = ?, kind = ?, amount = ?, occurred_at = ?,
+          source_account = ?, destination_account = ?, owner_name = ?, payer_name = ?, icon = ?, updated_by_user_id = ?
+        WHERE id = ?
+      `, [values.title, values.category, values.kind, values.amount, values.occurredAt, values.sourceAccount, values.kind === 'transfer' ? values.destinationAccount : null, values.owner, values.kind === 'expense' ? values.payer || null : null, values.icon, user.id, transactionId])
+      const updated = await getTransactionRecord(connection, transactionId)
+      await auditTransaction(connection, transactionId, user.id, 'updated', before, transactionSnapshot(updated))
+      await connection.commit()
+      return send(response, 200, mapTransaction(updated))
+    } catch (error) { await connection.rollback(); throw error } finally { connection.release() }
   }
 
   return send(response, 404, { error: 'ไม่พบเส้นทางนี้' })

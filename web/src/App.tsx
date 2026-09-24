@@ -4,7 +4,7 @@ import {
   ArrowDownLeft, ArrowDownRight, ArrowLeftRight, ArrowUpRight, Banknote,
   Bell, CalendarDays, Check, ChevronDown, ChevronRight, CircleHelp, CreditCard,
   Download, FileImage, Landmark, LayoutDashboard, ListFilter, LogOut, Plus,
-  Search, Settings2, SlidersHorizontal, Sparkles, Tag, TrendingUp, Upload,
+  History, RotateCcw, Search, Settings2, SlidersHorizontal, Sparkles, Tag, TrendingUp, Trash2, Upload,
   Users, Wallet, X,
 } from 'lucide-react'
 import './App.css'
@@ -17,6 +17,7 @@ type Transaction = {
   id: number; title: string; category: string; kind: Kind; amount: number
   date: string; account: string; owner: string; payer?: string; recorder: string; icon: string; scope: Scope
 }
+type AuditHistory = { id: number; action: 'created' | 'updated' | 'trashed' | 'restored'; before: { title?: string; category?: string; amount?: string } | null; after: { title?: string; category?: string; amount?: string } | null; actor: string; createdAt: string }
 
 const categories = {
   expense: ['อาหาร', 'เดินทาง', 'ของใช้ในบ้าน', 'บ้าน', 'การศึกษา', 'สุขภาพ', 'ช้อปปิ้ง', 'อื่น ๆ'],
@@ -42,6 +43,8 @@ function App() {
   const [search, setSearch] = useState('')
   const [kindFilter, setKindFilter] = useState('ทั้งหมด')
   const [modal, setModal] = useState(false)
+  const [editingTransactionId, setEditingTransactionId] = useState<number | null>(null)
+  const [historyEntries, setHistoryEntries] = useState<AuditHistory[] | null>(null)
   const [toast, setToast] = useState('')
   const [filePreview, setFilePreview] = useState('')
   const [formKind, setFormKind] = useState<Kind>('expense')
@@ -115,7 +118,11 @@ function App() {
   useEffect(() => {
     let active = true
     if (!authUser) { setTransactions([]); setApiStatus('offline'); return () => { active = false } }
-    fetch(`/api/transactions${scope === 'family' && activeFamilyId ? `?familyId=${activeFamilyId}` : ''}`)
+    const query = new URLSearchParams()
+    if (scope === 'family' && activeFamilyId) query.set('familyId', String(activeFamilyId))
+    if (page === 'ถังขยะ') query.set('trash', 'true')
+    const queryText = query.toString()
+    fetch(`/api/transactions${queryText ? `?${queryText}` : ''}`)
       .then(async (response) => {
         if (!response.ok) throw new Error('โหลดรายการไม่สำเร็จ')
         return response.json() as Promise<Transaction[]>
@@ -123,7 +130,7 @@ function App() {
       .then((rows) => { if (active) { setTransactions(rows); setApiStatus('connected') } })
       .catch(() => { if (active) setApiStatus('offline') })
     return () => { active = false }
-  }, [authUser, scope, activeFamilyId])
+  }, [authUser, scope, activeFamilyId, page])
 
   const filtered = useMemo(() => transactions.filter((item) => {
     const scopeMatches = item.scope === scope
@@ -139,8 +146,18 @@ function App() {
   }, [transactions, scope])
 
   function openComposer(kind: Kind = 'expense') {
+    setEditingTransactionId(null)
     setFormKind(kind); setFormScope(scope); setFormCategory(kind === 'income' ? 'เงินเดือน' : 'อาหาร')
     setFormAmount(''); setFormTitle(''); setFilePreview(''); setFormOwner(authUser?.displayName || ''); setFormPayer(authUser?.displayName || ''); setModal(true)
+  }
+
+  function editTransaction(item: Transaction) {
+    setEditingTransactionId(item.id)
+    setFormKind(item.kind); setFormScope(item.scope); setFormCategory(item.category)
+    setFormAmount(String(item.amount)); setFormTitle(item.title)
+    const [account, destination] = item.account.split(' → ')
+    setFormAccount(account); if (destination) setFormDestination(destination)
+    setFormOwner(item.owner); setFormPayer(item.payer || item.recorder); setFilePreview(''); setModal(true)
   }
 
   function notify(message: string) {
@@ -172,23 +189,45 @@ function App() {
       icon: formKind === 'income' ? '💰' : formKind === 'transfer' ? '↗' : '🧾',
     }
     try {
-      const response = await fetch('/api/transactions', {
-        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+      const response = await fetch(editingTransactionId ? `/api/transactions/${editingTransactionId}` : '/api/transactions', {
+        method: editingTransactionId ? 'PATCH' : 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
       })
       const saved = await response.json() as Transaction | { error?: string }
       if (!response.ok || !('id' in saved)) throw new Error('error' in saved ? saved.error : 'บันทึกรายการไม่สำเร็จ')
-      setTransactions((items) => [saved, ...items])
-      setApiStatus('connected'); setModal(false); notify('บันทึกลง MySQL แล้ว')
+      setTransactions((items) => editingTransactionId ? items.map((item) => item.id === saved.id ? saved : item) : [saved, ...items])
+      setApiStatus('connected'); setModal(false); setEditingTransactionId(null); notify(editingTransactionId ? 'แก้ไขรายการแล้ว' : 'บันทึกลง MySQL แล้ว')
     } catch (error) {
       setApiStatus('offline')
       notify(error instanceof Error ? error.message : 'เชื่อมต่อฐานข้อมูลไม่สำเร็จ')
     }
   }
 
+  async function trashTransaction(item: Transaction) {
+    if (!window.confirm(`ย้าย “${item.title}” ไปถังขยะหรือไม่?`)) return
+    const response = await fetch(`/api/transactions/${item.id}`, { method: 'DELETE', headers: { 'content-type': 'application/json' }, body: '{}' })
+    const result = await response.json() as { error?: string }
+    if (!response.ok) return notify(result.error || 'ย้ายรายการไปถังขยะไม่สำเร็จ')
+    setTransactions((items) => items.filter((current) => current.id !== item.id)); notify('ย้ายรายการไปถังขยะแล้ว')
+  }
+
+  async function restoreTransaction(item: Transaction) {
+    const response = await fetch(`/api/transactions/${item.id}/restore`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })
+    const result = await response.json() as { transaction?: Transaction; error?: string }
+    if (!response.ok) return notify(result.error || 'กู้คืนรายการไม่สำเร็จ')
+    setTransactions((items) => items.filter((current) => current.id !== item.id)); notify('กู้คืนรายการแล้ว')
+  }
+
+  async function viewHistory(item: Transaction) {
+    const response = await fetch(`/api/transactions/${item.id}/history`)
+    const result = await response.json() as AuditHistory[] | { error?: string }
+    if (!response.ok || !Array.isArray(result)) return notify(!Array.isArray(result) ? result.error || 'โหลดประวัติไม่สำเร็จ' : 'โหลดประวัติไม่สำเร็จ')
+    setHistoryEntries(result)
+  }
+
   const navItems = [
     { label: 'ภาพรวม', icon: LayoutDashboard }, { label: 'รายการทั้งหมด', icon: ListFilter },
     { label: 'งบประมาณ', icon: SlidersHorizontal }, { label: 'บัญชีเงิน', icon: Wallet },
-    { label: 'ครอบครัว', icon: Users },
+    { label: 'ครอบครัว', icon: Users }, { label: 'ถังขยะ', icon: Trash2 },
   ]
   const monthText = monthIndex === 0 ? 'กันยายน 2569' : monthIndex < 0 ? 'สิงหาคม 2569' : 'ตุลาคม 2569'
 
@@ -268,7 +307,7 @@ function App() {
         </header>
 
         <div className="content-wrap">
-          <div className="prototype-warning"><strong>ยังไม่พร้อมเปิดใช้งานผ่านโดเมน</strong><span>คำเชิญสมาชิกใช้งานได้แล้ว ส่วนงบ บัญชีเงิน และสิทธิ์แก้ไขรายการยังอยู่ระหว่างพัฒนา</span></div>
+          <div className="prototype-warning"><strong>ยังไม่พร้อมเปิดใช้งานผ่านโดเมน</strong><span>เพิ่มการแก้ไข/ถังขยะ/ประวัติรายการแล้ว แต่ยังต้องตรวจสิทธิ์และรายการเงินจริง รวมถึงงบกับบัญชีเงินยังเป็นข้อมูลตัวอย่าง</span></div>
           <div className="page-heading">
             <div><div className="eyebrow"><span className="eyebrow-dot" /> ภาพรวมการเงิน</div><h1>{page === 'ภาพรวม' ? `สวัสดี, ${authUser.displayName}` : page}</h1><p>{page === 'ภาพรวม' ? 'มาดูภาพรวมการเงินของบ้านในเดือนนี้กัน' : 'ดูข้อมูลและจัดการรายการของคุณได้ที่นี่'}</p></div>
             <div className="heading-actions"><button className="secondary-button" onClick={() => notify('เตรียมดาวน์โหลดรายงานตัวอย่าง')}><Download size={16} /> <span>ส่งออกรายงาน</span></button><button className="primary-button" onClick={() => openComposer('expense')}><Plus size={17} /> เพิ่มรายการ</button></div>
@@ -303,20 +342,21 @@ function App() {
             </section>
           </>}
 
-          {page !== 'ภาพรวม' && <PageContent page={page} rows={filtered} search={search} familyInfo={familyInfo} activeFamilyId={activeFamilyId} inviteLink={inviteLink} onCreateInvitation={createInvitation} onRevokeInvitation={revokeInvitation} onLeaveFamily={leaveFamily} onCloseInvite={() => setInviteLink('')} onSearch={setSearch} kindFilter={kindFilter} onKindFilter={setKindFilter} onAdd={() => openComposer(page === 'รายการทั้งหมด' ? 'expense' : 'income')} onToast={notify} />}
+          {page !== 'ภาพรวม' && <PageContent page={page} rows={filtered} search={search} familyInfo={familyInfo} activeFamilyId={activeFamilyId} inviteLink={inviteLink} onCreateInvitation={createInvitation} onRevokeInvitation={revokeInvitation} onLeaveFamily={leaveFamily} onCloseInvite={() => setInviteLink('')} onSearch={setSearch} kindFilter={kindFilter} onKindFilter={setKindFilter} onAdd={() => openComposer(page === 'รายการทั้งหมด' ? 'expense' : 'income')} onEdit={editTransaction} onTrash={trashTransaction} onRestore={restoreTransaction} onHistory={viewHistory} onToast={notify} />}
         </div>
       </main>
 
       <button className="mobile-add" onClick={() => openComposer('expense')}><Plus size={22}/></button>
 
-      {modal && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setModal(false) }}><div className="composer-modal" role="dialog" aria-modal="true" aria-labelledby="composer-title"><div className="modal-heading"><div><div className="modal-kicker">เพิ่มรายการใหม่</div><h2 id="composer-title">บันทึกการเงิน</h2></div><button className="icon-button" onClick={() => setModal(false)} aria-label="ปิด"><X size={19}/></button></div><div className="kind-tabs">{([{key:'expense',label:'รายจ่าย',icon:<ArrowUpRight size={15}/>},{key:'income',label:'รายรับ',icon:<ArrowDownRight size={15}/>},{key:'transfer',label:'โอนเงิน',icon:<ArrowLeftRight size={15}/>} ] as const).map((item) => <button key={item.key} className={formKind === item.key ? `${item.key} active` : ''} onClick={() => { setFormKind(item.key); setFormCategory(item.key === 'income' ? 'เงินเดือน' : 'อาหาร') }}>{item.icon}{item.label}</button>)}</div><form onSubmit={saveTransaction}>
+      {modal && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setModal(false) }}><div className="composer-modal" role="dialog" aria-modal="true" aria-labelledby="composer-title"><div className="modal-heading"><div><div className="modal-kicker">{editingTransactionId ? 'แก้ไขรายการ' : 'เพิ่มรายการใหม่'}</div><h2 id="composer-title">{editingTransactionId ? 'ปรับข้อมูลการเงิน' : 'บันทึกการเงิน'}</h2></div><button className="icon-button" onClick={() => setModal(false)} aria-label="ปิด"><X size={19}/></button></div><div className="kind-tabs">{([{key:'expense',label:'รายจ่าย',icon:<ArrowUpRight size={15}/>},{key:'income',label:'รายรับ',icon:<ArrowDownRight size={15}/>},{key:'transfer',label:'โอนเงิน',icon:<ArrowLeftRight size={15}/>} ] as const).map((item) => <button key={item.key} type="button" className={formKind === item.key ? `${item.key} active` : ''} onClick={() => { setFormKind(item.key); setFormCategory(item.key === 'income' ? 'เงินเดือน' : 'อาหาร') }}>{item.icon}{item.label}</button>)}</div><form onSubmit={saveTransaction}>
         <div className="amount-field"><label htmlFor="amount">จำนวนเงิน</label><div><span>฿</span><input id="amount" inputMode="decimal" value={formAmount} onChange={(event) => setFormAmount(event.target.value)} placeholder="0.00" required /></div></div>
         <div className="form-row"><label>ขอบเขต</label><div className="scope-options"><button type="button" className={formScope === 'family' ? 'chosen' : ''} onClick={() => { setFormScope('family'); setFormOwner(authUser.displayName); setFormPayer(authUser.displayName) }}><Users size={15}/> ครอบครัว</button><button type="button" className={formScope === 'personal' ? 'chosen' : ''} onClick={() => { setFormScope('personal'); setFormOwner(authUser.displayName); setFormPayer(authUser.displayName) }}><Wallet size={15}/> ส่วนตัว</button></div></div>
         <div className={`form-grid ${formKind === 'transfer' ? 'single' : ''}`}><label className="input-label">{formKind === 'income' ? 'ที่มาของรายรับ' : formKind === 'transfer' ? 'รายละเอียดการโอน' : 'ชื่อรายการ'}<input value={formTitle} onChange={(event) => setFormTitle(event.target.value)} placeholder={formKind === 'income' ? 'เช่น เงินเดือน' : formKind === 'transfer' ? 'เช่น โอนให้แม่' : 'เช่น ซื้อของเข้าบ้าน'} /></label>{formKind !== 'transfer' && <label className="input-label">หมวดหมู่<select value={formCategory} onChange={(event) => setFormCategory(event.target.value)}>{categories[formKind].map((item) => <option key={item}>{item}</option>)}</select></label>}</div>
         {formKind === 'transfer' ? <div className="form-grid"><label className="input-label">บัญชีต้นทาง<select value={formAccount} onChange={(event) => setFormAccount(event.target.value)}><option>เงินสด</option><option>KBank •• 4821</option><option>SCB •• 1092</option></select></label><label className="input-label">บัญชีปลายทาง<select value={formDestination} onChange={(event) => setFormDestination(event.target.value)}><option>เงินสด</option><option>KBank •• 4821</option><option>SCB •• 1092</option></select></label></div> : <><div className="form-grid"><label className="input-label">บัญชีเงิน<select value={formAccount} onChange={(event) => setFormAccount(event.target.value)}><option>เงินสด</option><option>KBank •• 4821</option><option>SCB •• 1092</option></select></label>{formKind === 'expense' && <label className="input-label">ผู้จ่าย<select value={formPayer} onChange={(event) => setFormPayer(event.target.value)}><option>{authUser.displayName}</option>{formScope === 'family' && <option>ครอบครัว</option>}</select></label>}</div><div className="form-grid"><label className="input-label">เจ้าของรายการ<select value={formOwner} onChange={(event) => setFormOwner(event.target.value)}><option>{authUser.displayName}</option>{formScope === 'family' && <option>ครอบครัว</option>}</select></label></div></>}
         {formKind === 'expense' && <div className="receipt-box">{filePreview ? <div className="receipt-preview"><img src={filePreview} alt="ภาพสลิปที่เลือก"/><div><strong><Sparkles size={14}/> ข้อมูลที่อ่านได้ (ตัวอย่าง)</strong><span>ร้านกาแฟ · ฿185 · วันนี้</span><button type="button" onClick={() => fileInput.current?.click()}>เลือกภาพอื่น</button></div></div> : <button type="button" className="receipt-select" onClick={() => fileInput.current?.click()}><span className="receipt-icon"><FileImage size={19}/></span><span><strong>แนบสลิปหรือใบเสร็จ</strong><small>เลือกภาพจากคลังหรือถ่ายภาพ</small></span><Upload size={16}/></button>}<input ref={fileInput} type="file" accept="image/*" capture="environment" hidden onChange={handleImage}/></div>}
         <div className="modal-footer"><span><CircleHelp size={14}/> ผู้บันทึก: คุณ</span><button type="button" className="secondary-button" onClick={() => setModal(false)}>ยกเลิก</button><button type="submit" className="primary-button"><Check size={16}/> บันทึกรายการ</button></div>
-      </form></div></div>}
+        </form></div></div>}
+      {historyEntries && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setHistoryEntries(null) }}><div className="composer-modal history-modal" role="dialog" aria-modal="true" aria-labelledby="history-title"><div className="modal-heading"><div><div className="modal-kicker">ตรวจสอบการเปลี่ยนแปลง</div><h2 id="history-title">ประวัติรายการ</h2></div><button className="icon-button" onClick={() => setHistoryEntries(null)} aria-label="ปิด"><X size={19}/></button></div>{historyEntries.length ? historyEntries.map((entry) => <div className="history-entry" key={entry.id}><strong>{entry.action === 'created' ? 'สร้างรายการ' : entry.action === 'updated' ? 'แก้ไขรายการ' : entry.action === 'trashed' ? 'ย้ายไปถังขยะ' : 'กู้คืนรายการ'}</strong><span>{entry.actor} · {new Date(entry.createdAt).toLocaleString('th-TH')}</span><small>{entry.before ? `${entry.before.title} · ฿${entry.before.amount} · ${entry.before.category}` : '—'} → {entry.after ? `${entry.after.title} · ฿${entry.after.amount} · ${entry.after.category}` : '—'}</small></div>) : <div className="empty-state">ยังไม่มีประวัติการเปลี่ยนแปลง</div>}</div></div>}
       {toast && <div className="toast"><Check size={16}/>{toast}</div>}
     </div>
   )
@@ -371,16 +411,17 @@ function BudgetRow({ icon, name, used, limit, color }: { icon: string; name: str
   return <div className="budget-row"><div className="budget-row-top"><span className="budget-name"><span className="budget-emoji">{icon}</span>{name}</span><span className="budget-amount"><b>฿{formatMoney(used)}</b><span> / ฿{formatMoney(limit)}</span></span></div><div className="progress-track"><span className={`progress-fill ${color}`} style={{ width: `${percent}%` }}/></div><div className="budget-percent">ใช้ไป {percent}%</div></div>
 }
 
-function TransactionTable({ rows }: { rows: Transaction[] }) {
-  return <div className="transaction-table"><div className="table-head"><span>รายการ</span><span>วันที่</span><span>บัญชีเงิน</span><span>เจ้าของรายการ</span><span className="align-right">จำนวนเงิน</span></div>{rows.length ? rows.map((item) => <div className="transaction-row" key={item.id}><div className="transaction-name"><span className={`transaction-icon ${item.kind}`}>{item.icon}</span><span><strong>{item.title}</strong><small>{item.category}</small></span></div><span className="transaction-date">{item.date}</span><span className="transaction-account">{item.account}</span><span className="owner-chip"><i className={item.owner === 'ครอบครัว' ? 'family-dot' : ''}/><span>{item.owner}<small>{item.kind === 'expense' ? `จ่ายโดย ${item.payer ?? item.recorder}` : `บันทึกโดย ${item.recorder}`}</small></span></span><strong className={`transaction-amount ${item.kind}`}>{item.kind === 'income' ? '+' : item.kind === 'transfer' ? '↗ ' : '−'}฿{formatMoney(item.amount)}</strong></div>) : <div className="empty-state"><Search size={20}/>ไม่พบรายการที่ตรงกับตัวกรอง</div>}</div>
+function TransactionTable({ rows, onEdit, onTrash, onRestore, onHistory }: { rows: Transaction[]; onEdit?: (item: Transaction) => void; onTrash?: (item: Transaction) => void; onRestore?: (item: Transaction) => void; onHistory?: (item: Transaction) => void }) {
+  return <div className="transaction-table"><div className="table-head"><span>รายการ</span><span>วันที่</span><span>บัญชีเงิน</span><span>เจ้าของรายการ</span><span className="align-right">จำนวนเงิน</span></div>{rows.length ? rows.map((item) => <div className="transaction-row" key={item.id}><div className="transaction-name"><span className={`transaction-icon ${item.kind}`}>{item.icon}</span><span><strong>{item.title}</strong><small>{item.category}</small></span>{(onEdit || onTrash || onRestore || onHistory) && <div className="transaction-actions">{onEdit && <button title="แก้ไขรายการ" aria-label={`แก้ไข ${item.title}`} onClick={() => onEdit(item)}><Settings2 size={14}/></button>}{onTrash && <button title="ย้ายไปถังขยะ" aria-label={`ลบ ${item.title}`} onClick={() => onTrash(item)}><Trash2 size={14}/></button>}{onRestore && <button title="กู้คืนรายการ" aria-label={`กู้คืน ${item.title}`} onClick={() => onRestore(item)}><RotateCcw size={14}/></button>}{onHistory && <button title="ประวัติรายการ" aria-label={`ประวัติ ${item.title}`} onClick={() => onHistory(item)}><History size={14}/></button>}</div>}</div><span className="transaction-date">{item.date}</span><span className="transaction-account">{item.account}</span><span className="owner-chip"><i className={item.owner === 'ครอบครัว' ? 'family-dot' : ''}/><span>{item.owner}<small>{item.kind === 'expense' ? `จ่ายโดย ${item.payer ?? item.recorder}` : `บันทึกโดย ${item.recorder}`}</small></span></span><strong className={`transaction-amount ${item.kind}`}>{item.kind === 'income' ? '+' : item.kind === 'transfer' ? '↗ ' : '−'}฿{formatMoney(item.amount)}</strong></div>) : <div className="empty-state"><Search size={20}/>{onRestore ? 'ถังขยะว่างเปล่า' : 'ไม่พบรายการที่ตรงกับตัวกรอง'}</div>}</div>
 }
 
 function AccountRow({ icon, title, owner, amount, tone }: { icon: ReactNode; title: string; owner: string; amount: string; tone: string }) {
   return <div className="account-row"><div className={`account-icon ${tone}`}>{icon}</div><div className="account-copy"><strong>{title}</strong><span>{owner}</span></div><div className="account-amount"><strong>฿{amount}</strong><span>ยอดคงเหลือ</span></div></div>
 }
 
-function PageContent({ page, rows, search, familyInfo, activeFamilyId, inviteLink, onCreateInvitation, onRevokeInvitation, onLeaveFamily, onCloseInvite, onSearch, kindFilter, onKindFilter, onAdd, onToast }: { page: string; rows: Transaction[]; search: string; familyInfo: FamilyInfo[]; activeFamilyId: number | null; inviteLink: string; onCreateInvitation: (familyId: number) => void; onRevokeInvitation: (familyId: number, invitationId: number) => void; onLeaveFamily: (familyId: number) => void; onCloseInvite: () => void; onSearch: (value: string) => void; kindFilter: string; onKindFilter: (value: string) => void; onAdd: () => void; onToast: (message: string) => void }) {
-  if (page === 'รายการทั้งหมด') return <div className="panel full-page-panel"><div className="list-toolbar"><div className="search-field"><Search size={16}/><input value={search} onChange={(event) => onSearch(event.target.value)} placeholder="ค้นหารายการ"/></div><select className="filter-select" value={kindFilter} onChange={(event) => onKindFilter(event.target.value)} aria-label="กรองประเภทรายการ"><option>ทั้งหมด</option><option>รายรับ</option><option>รายจ่าย</option><option>โอน</option></select><button className="primary-button" onClick={onAdd}><Plus size={16}/> เพิ่มรายการ</button></div><TransactionTable rows={rows}/></div>
+function PageContent({ page, rows, search, familyInfo, activeFamilyId, inviteLink, onCreateInvitation, onRevokeInvitation, onLeaveFamily, onCloseInvite, onSearch, kindFilter, onKindFilter, onAdd, onEdit, onTrash, onRestore, onHistory, onToast }: { page: string; rows: Transaction[]; search: string; familyInfo: FamilyInfo[]; activeFamilyId: number | null; inviteLink: string; onCreateInvitation: (familyId: number) => void; onRevokeInvitation: (familyId: number, invitationId: number) => void; onLeaveFamily: (familyId: number) => void; onCloseInvite: () => void; onSearch: (value: string) => void; kindFilter: string; onKindFilter: (value: string) => void; onAdd: () => void; onEdit: (item: Transaction) => void; onTrash: (item: Transaction) => void; onRestore: (item: Transaction) => void; onHistory: (item: Transaction) => void; onToast: (message: string) => void }) {
+  if (page === 'ถังขยะ') return <div className="panel full-page-panel"><div className="panel-header"><div><div className="panel-title">ถังขยะ</div><div className="panel-subtitle">รายการที่ลบจะไม่รวมในสรุป และกู้คืนได้</div></div></div><TransactionTable rows={rows} onRestore={onRestore}/></div>
+  if (page === 'รายการทั้งหมด') return <div className="panel full-page-panel"><div className="list-toolbar"><div className="search-field"><Search size={16}/><input value={search} onChange={(event) => onSearch(event.target.value)} placeholder="ค้นหารายการ"/></div><select className="filter-select" value={kindFilter} onChange={(event) => onKindFilter(event.target.value)} aria-label="กรองประเภทรายการ"><option>ทั้งหมด</option><option>รายรับ</option><option>รายจ่าย</option><option>โอน</option></select><button className="primary-button" onClick={onAdd}><Plus size={16}/> เพิ่มรายการ</button></div><TransactionTable rows={rows} onEdit={onEdit} onTrash={onTrash} onHistory={onHistory}/></div>
   if (page === 'งบประมาณ') return <div className="page-cards"><div className="panel page-budget-card"><div className="panel-header"><div><div className="panel-title">งบครอบครัว · กันยายน 2569</div><div className="panel-subtitle">ใช้ไป ฿20,800 จากงบทั้งหมด ฿32,500</div></div><button className="primary-button" onClick={() => onToast('เปิดแบบฟอร์มตั้งงบประมาณตัวอย่าง')}><Plus size={16}/> เพิ่มงบ</button></div>{[['🏠','บ้านและที่พัก',8500,10000,'teal'],['🍜','อาหารและเครื่องดื่ม',6240,8000,'orange'],['🚗','เดินทาง',2860,5000,'blue'],['📚','การศึกษา',3200,6000,'purple']].map(([icon,name,used,limit,color])=><BudgetRow key={String(name)} icon={String(icon)} name={String(name)} used={Number(used)} limit={Number(limit)} color={String(color)}/>)}</div><div className="panel page-note"><Sparkles size={20}/><strong>งบที่ใช้ไป 64%</strong><p>ต้นแบบนี้แสดงข้อมูลงบตัวอย่าง เมื่อเชื่อมระบบจริงแล้วจะคำนวณจากรายการที่ยืนยัน</p></div></div>
   if (page === 'บัญชีเงิน') return <div className="panel full-page-panel"><div className="panel-header"><div><div className="panel-title">บัญชีเงินของครอบครัว</div><div className="panel-subtitle">ยอดรวมตัวอย่าง ฿48,260 · มียอดตั้งต้นและรายการล่าสุด</div></div><button className="primary-button" onClick={() => onToast('เพิ่มบัญชีเงินได้ในระยะเชื่อมฐานข้อมูล')}><Plus size={16}/> เพิ่มบัญชี</button></div><div className="account-page-grid"><AccountRow icon={<Banknote size={18}/>} title="เงินสดครอบครัว" owner="ครอบครัว · เงินสด" amount="4,820" tone="mint"/><AccountRow icon={<Landmark size={18}/>} title="KBank •• 4821" owner="พิมพ์ชนก · ธนาคาร" amount="28,440" tone="violet"/><AccountRow icon={<CreditCard size={18}/>} title="SCB •• 1092" owner="ครอบครัว · ธนาคาร" amount="15,000" tone="blue"/></div></div>
   if (page === 'ครอบครัว') return <div className="page-cards"><div className="panel family-panel"><div className="panel-header"><div><div className="panel-title">สมาชิกในบ้าน</div><div className="panel-subtitle">{familyInfo.find((family) => family.id === activeFamilyId)?.name || 'พื้นที่ครอบครัว'}</div></div>{familyInfo.find((family) => family.id === activeFamilyId)?.role === 'owner' && <button className="primary-button" onClick={() => activeFamilyId && onCreateInvitation(activeFamilyId)}><Plus size={16}/> เชิญสมาชิก</button>}</div>{familyInfo.filter((family) => family.id === activeFamilyId).flatMap((family) => <section key={family.id}><div className="member-list">{family.members.map((member, index) => <div className="member-row" key={member.id}><div className={`avatar member-avatar member-${index % 4}`}>{member.displayName.slice(0, 1)}</div><div className="member-copy"><strong>{member.displayName}</strong><span>{member.email}</span></div><span className="member-badge">{member.role === 'owner' ? 'เจ้าของ' : 'สมาชิก'}</span></div>)}</div>{family.role === 'owner' && family.invitations.map((invite) => <div className="member-row" key={invite.id}><div className="avatar member-avatar">✉</div><div className="member-copy"><strong>ลิงก์เชิญรอใช้งาน</strong><span>หมดอายุ {new Date(invite.expiresAt).toLocaleString('th-TH')}</span></div><button className="secondary-button" onClick={() => onRevokeInvitation(family.id, invite.id)}>ยกเลิก</button></div>)}{family.role === 'member' && <button className="secondary-button" onClick={() => onLeaveFamily(family.id)}>ออกจากครอบครัว</button>}</section>)}{!familyInfo.length && <div className="empty-state">ยังไม่มีครอบครัวที่เข้าร่วม</div>}{inviteLink && <div className="invite-result"><strong>ลิงก์เชิญพร้อมแชร์ · ใช้ได้ 7 วัน และใช้ได้ครั้งเดียว</strong><input readOnly value={inviteLink} onFocus={(event) => event.currentTarget.select()}/><button className="primary-button" onClick={() => navigator.clipboard?.writeText(inviteLink).then(() => onToast('คัดลอกลิงก์แล้ว')).catch(() => onToast('เลือกและคัดลอกลิงก์ได้จากช่องด้านบน'))}>คัดลอกลิงก์</button><button className="secondary-button" onClick={onCloseInvite}>ปิด</button></div>}</div><div className="panel page-note"><Users size={20}/><strong>สิทธิ์สมาชิก</strong><p>สมาชิกดูรายการครอบครัวได้ การแก้ไขและการจัดการรายการยังอยู่ระหว่างพัฒนา</p></div></div>

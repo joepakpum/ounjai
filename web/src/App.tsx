@@ -4,7 +4,7 @@ import {
   ArrowDownLeft, ArrowDownRight, ArrowLeftRight, ArrowUpRight, Banknote,
   Bell, CalendarDays, Check, ChevronDown, ChevronRight, CircleHelp, CreditCard,
   Download, FileImage, Landmark, LayoutDashboard, ListFilter, LogOut, Plus,
-  History, RotateCcw, Search, Settings2, SlidersHorizontal, Sparkles, Tag, TrendingUp, Trash2, Upload,
+  History, MoreHorizontal, RotateCcw, Search, Settings2, SlidersHorizontal, Sparkles, Tag, TrendingUp, Trash2, Upload,
   Users, Wallet, X,
 } from 'lucide-react'
 import './App.css'
@@ -57,6 +57,7 @@ function App() {
   const [apiStatus, setApiStatus] = useState<'connecting' | 'connected' | 'offline'>('connecting')
   const [scope, setScope] = useState<Scope>('family')
   const [page, setPage] = useState('ภาพรวม')
+  const [mobileMoreOpen, setMobileMoreOpen] = useState(false)
   const [range, setRange] = useState('เดือนนี้')
   const [dateFrom, setDateFrom] = useState(monthStart(bangkokToday()))
   const [dateTo, setDateTo] = useState(bangkokToday())
@@ -709,8 +710,11 @@ function App() {
         <button className="workspace-switch"><div className="workspace-avatar">{scope === 'family' ? (authUser.families.find((family) => family.id === activeFamilyId)?.name || 'บ').slice(0, 1) : authUser.displayName.slice(0, 1)}</div><div className="workspace-copy"><strong>{scope === 'family' ? authUser.families.find((family) => family.id === activeFamilyId)?.name || 'ยังไม่มีครอบครัว' : 'พื้นที่ส่วนตัว'}</strong><span>{scope === 'family' ? `${familyInfo.find((family) => family.id === activeFamilyId)?.members.length || 0} สมาชิก` : 'บัญชีส่วนตัว'}</span></div><ChevronDown size={15} /></button>
         <div className="nav-label">เมนูหลัก</div>
         <nav className="nav-list">
-          {navItems.map(({ label, icon: Icon }) => <button key={label} onClick={() => { setPage(label); if (label === 'รายงาน') { setKindFilter('ทั้งหมด'); setSearch('') } }} className={`nav-item ${page === label ? 'active' : ''}`}><Icon size={18} strokeWidth={1.8} /><span>{label}</span>{label === 'งบประมาณ' && budgetAlerts.length > 0 && <span className="nav-count">{budgetAlerts.length}</span>}{label === 'รายการประจำ' && recurringReviews.length > 0 && <span className="nav-count">{recurringReviews.length}</span>}</button>)}
+          {navItems.map(({ label, icon: Icon }) => <button key={`desktop-${label}`} onClick={() => { setPage(label); if (label === 'รายงาน') { setKindFilter('ทั้งหมด'); setSearch('') } }} className={`nav-item desktop-nav-item ${page === label ? 'active' : ''}`}><Icon size={18} strokeWidth={1.8} /><span>{label}</span>{label === 'งบประมาณ' && budgetAlerts.length > 0 && <span className="nav-count">{budgetAlerts.length}</span>}{label === 'รายการประจำ' && recurringReviews.length > 0 && <span className="nav-count">{recurringReviews.length}</span>}</button>)}
+          {navItems.slice(0, 4).map(({ label, icon: Icon }) => <button key={`mobile-${label}`} onClick={() => { setPage(label); setMobileMoreOpen(false); if (label === 'รายงาน') { setKindFilter('ทั้งหมด'); setSearch('') } }} className={`nav-item mobile-nav-item ${page === label ? 'active' : ''}`}><Icon size={18} strokeWidth={1.8} /><span>{label === 'รายการทั้งหมด' ? 'รายการ' : label}</span></button>)}
+          <button className={`nav-item mobile-nav-item mobile-more-trigger ${mobileMoreOpen || navItems.slice(4).some((item) => item.label === page) ? 'active' : ''}`} aria-expanded={mobileMoreOpen} onClick={() => setMobileMoreOpen((open) => !open)}><MoreHorizontal size={19} strokeWidth={1.8} /><span>เพิ่มเติม</span></button>
         </nav>
+        {mobileMoreOpen && <><button className="mobile-more-backdrop" aria-label="ปิดเมนูเพิ่มเติม" onClick={() => setMobileMoreOpen(false)} /><div className="mobile-more-menu" role="menu">{navItems.slice(4).map(({ label, icon: Icon }) => <button role="menuitem" key={label} className={`nav-item ${page === label ? 'active' : ''}`} onClick={() => { setPage(label); setMobileMoreOpen(false) }}><Icon size={17} strokeWidth={1.8} /><span>{label}</span>{label === 'รายการประจำ' && recurringReviews.length > 0 && <span className="nav-count">{recurringReviews.length}</span>}</button>)}</div></>}
         <div className="sidebar-bottom">
           <div className="sidebar-tip"><div className="tip-icon"><Sparkles size={16} /></div><strong>เริ่มจดได้เลย</strong><p>เพิ่มรายการใหม่เพื่อให้เห็นภาพรวมการเงินของบ้าน</p><button onClick={() => openComposer('expense')}>เพิ่มรายการ <ArrowUpRight size={14} /></button></div>
           <button className="nav-item"><Settings2 size={18} /><span>ตั้งค่า</span></button>

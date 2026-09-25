@@ -258,7 +258,7 @@ async function currentUser(request) {
   const [rows] = await pool.execute(`
     SELECT u.id, u.email, u.display_name, u.system_role
     FROM user_sessions s JOIN users u ON u.id = s.user_id
-    WHERE s.id = ? AND s.expires_at > UTC_TIMESTAMP() AND u.email_verified_at IS NOT NULL
+    WHERE s.id = ? AND s.expires_at > UTC_TIMESTAMP() AND u.email_verified_at IS NOT NULL AND u.deleted_at IS NULL
   `, [digest(token)])
   if (!rows.length) return null
   const [families] = await pool.execute(`
@@ -278,10 +278,10 @@ async function syncConfiguredSuperAdmin() {
   if (!email) return
   await pool.execute(`
     UPDATE users SET system_role = CASE
-      WHEN LOWER(email) = ? AND email_verified_at IS NOT NULL THEN 'superadmin'
+      WHEN LOWER(email) = ? AND email_verified_at IS NOT NULL AND deleted_at IS NULL THEN 'superadmin'
       ELSE 'user'
     END
-    WHERE system_role = 'superadmin' OR LOWER(email) = ?
+    WHERE deleted_at IS NULL AND (system_role = 'superadmin' OR LOWER(email) = ?)
   `, [email, email])
 }
 
@@ -609,7 +609,7 @@ async function handle(request, response) {
     const email = String(body.email || '').trim().toLowerCase()
     const password = String(body.password || '')
     if (password.length > 128 || email.length > 254) return send(response, 400, { error: 'อีเมลหรือรหัสผ่านไม่ถูกต้อง' })
-    const [users] = await pool.execute('SELECT id, email, display_name, password_hash, email_verified_at FROM users WHERE email = ?', [email])
+    const [users] = await pool.execute('SELECT id, email, display_name, password_hash, email_verified_at FROM users WHERE email = ? AND deleted_at IS NULL', [email])
     const valid = await argon2.verify(users[0]?.password_hash || dummyPasswordHash, password).catch(() => false) && users.length > 0
     if (!valid) return send(response, 401, { error: 'อีเมลหรือรหัสผ่านไม่ถูกต้อง' })
     if (!users[0].email_verified_at) return send(response, 403, { error: 'กรุณายืนยันอีเมลก่อนเข้าสู่ระบบ' })
@@ -621,6 +621,183 @@ async function handle(request, response) {
     const token = readCookie(request, cookieName)
     if (token) await pool.execute('DELETE FROM user_sessions WHERE id = ?', [digest(token)])
     return send(response, 200, { ok: true }, { 'set-cookie': sessionCookie('', 0) })
+  }
+
+  if (method === 'POST' && pathname === '/api/auth/delete-account') {
+    if (rateLimit(request, response, 'delete-account', 5)) return
+    const user = await currentUser(request)
+    if (!user) return send(response, 401, { error: 'กรุณาเข้าสู่ระบบอีกครั้งก่อนลบบัญชี' })
+    const body = await readJson(request)
+    const password = String(body.password || '')
+    if (!password || Buffer.byteLength(password, 'utf8') > 128) return send(response, 400, { error: 'รหัสผ่านไม่ถูกต้อง' })
+    if (String(body.confirmation || '') !== 'ลบบัญชี') return send(response, 400, { error: 'กรุณาพิมพ์ “ลบบัญชี” เพื่อยืนยัน' })
+
+    const connection = await pool.getConnection()
+    let receiptKeys = []
+    try {
+      await connection.beginTransaction()
+      const [[accountUser]] = await connection.execute('SELECT id, email, display_name, password_hash FROM users WHERE id = ? AND deleted_at IS NULL FOR UPDATE', [user.id])
+      if (!accountUser || !await argon2.verify(accountUser.password_hash, password).catch(() => false)) {
+        await connection.rollback()
+        return send(response, 401, { error: 'รหัสผ่านไม่ถูกต้อง' })
+      }
+      const [ownedFamilies] = await connection.execute(`
+        SELECT family_id FROM family_members
+        WHERE user_id = ? AND role = 'owner' AND left_at IS NULL FOR UPDATE
+      `, [user.id])
+      if (ownedFamilies.length) {
+        await connection.rollback()
+        return send(response, 409, { error: 'กรุณาโอนความเป็นเจ้าของครอบครัวก่อนลบบัญชี' })
+      }
+
+      const [privateTransactions] = await connection.execute(`
+        SELECT id FROM transactions
+        WHERE scope = 'personal' AND family_id IS NULL AND created_by_user_id = ?
+      `, [user.id])
+      const transactionIds = privateTransactions.map((row) => Number(row.id))
+      const [privateRules] = await connection.execute(`
+        SELECT id FROM recurring_rules WHERE owner_type = 'user' AND owner_ref = ?
+      `, [user.id])
+      const recurringIds = privateRules.map((row) => Number(row.id))
+      const [privateReceipts] = await connection.execute(`
+        SELECT storage_key FROM receipt_attachments
+        WHERE owner_user_id = ? AND family_id IS NULL
+      `, [user.id])
+      receiptKeys = privateReceipts.map((row) => String(row.storage_key))
+
+      const reviewClauses = []
+      const reviewParams = []
+      if (recurringIds.length) {
+        reviewClauses.push(`recurring_rule_id IN (${recurringIds.map(() => '?').join(',')})`)
+        reviewParams.push(...recurringIds)
+      }
+      if (transactionIds.length) {
+        reviewClauses.push(`transaction_id IN (${transactionIds.map(() => '?').join(',')})`)
+        reviewParams.push(...transactionIds)
+      }
+      if (reviewClauses.length) await connection.execute(`DELETE FROM recurring_reviews WHERE ${reviewClauses.join(' OR ')}`, reviewParams)
+      if (recurringIds.length) await connection.execute(`DELETE FROM recurring_rules WHERE id IN (${recurringIds.map(() => '?').join(',')})`, recurringIds)
+
+      const [personalBudgets] = await connection.execute('SELECT id FROM budgets WHERE owner_type = \'user\' AND owner_ref = ?', [user.id])
+      const budgetIds = personalBudgets.map((row) => Number(row.id))
+      if (budgetIds.length) {
+        const marks = budgetIds.map(() => '?').join(',')
+        await connection.execute(`DELETE FROM budget_movements WHERE from_budget_id IN (${marks}) OR to_budget_id IN (${marks})`, [...budgetIds, ...budgetIds])
+        await connection.execute(`DELETE FROM budgets WHERE id IN (${marks})`, budgetIds)
+      }
+
+      const [personalCategories] = await connection.execute("SELECT id FROM transaction_categories WHERE owner_type = 'user' AND owner_ref = ?", [user.id])
+      const categoryIds = personalCategories.map((row) => Number(row.id))
+      if (categoryIds.length) {
+        const marks = categoryIds.map(() => '?').join(',')
+        await connection.execute(`UPDATE transaction_allocations a JOIN transactions t ON t.id = a.transaction_id SET a.category_id = NULL WHERE a.category_id IN (${marks}) AND t.family_id IS NOT NULL`, categoryIds)
+        await connection.execute(`UPDATE transactions SET category_id = NULL WHERE category_id IN (${marks}) AND family_id IS NOT NULL`, categoryIds)
+        await connection.execute(`UPDATE recurring_rules SET category_id = NULL WHERE category_id IN (${marks}) AND owner_type = 'family'`, categoryIds)
+      }
+
+      const [personalAccounts] = await connection.execute("SELECT id FROM money_accounts WHERE owner_type = 'user' AND owner_ref = ?", [user.id])
+      const accountIds = personalAccounts.map((row) => Number(row.id))
+      const preservedAccountIds = []
+      if (accountIds.length) {
+        const marks = accountIds.map(() => '?').join(',')
+        const [referencedAccounts] = await connection.execute(`
+          SELECT DISTINCT a.id FROM money_accounts a
+          WHERE a.id IN (${marks}) AND (
+            EXISTS (SELECT 1 FROM transactions t WHERE t.family_id IS NOT NULL AND (t.source_account_id = a.id OR t.destination_account_id = a.id))
+            OR EXISTS (SELECT 1 FROM recurring_rules r WHERE r.owner_type = 'family' AND (r.source_account_id = a.id OR r.destination_account_id = a.id))
+          )
+        `, accountIds)
+        preservedAccountIds.push(...referencedAccounts.map((row) => Number(row.id)))
+      }
+
+      if (receiptKeys.length) {
+        await connection.execute('DELETE FROM receipt_attachments WHERE owner_user_id = ? AND family_id IS NULL', [user.id])
+      }
+      if (transactionIds.length) {
+        const marks = transactionIds.map(() => '?').join(',')
+        await connection.execute(`DELETE FROM transaction_allocations WHERE transaction_id IN (${marks})`, transactionIds)
+        await connection.execute(`DELETE FROM transaction_audit_logs WHERE transaction_id IN (${marks})`, transactionIds)
+        await connection.execute(`DELETE FROM transactions WHERE id IN (${marks})`, transactionIds)
+      }
+      if (categoryIds.length) {
+        await connection.execute(`DELETE FROM transaction_categories WHERE id IN (${categoryIds.map(() => '?').join(',')})`, categoryIds)
+      }
+
+      const deleteAccountIds = accountIds.filter((id) => !preservedAccountIds.includes(id))
+      if (deleteAccountIds.length) await connection.execute(`DELETE FROM money_accounts WHERE id IN (${deleteAccountIds.map(() => '?').join(',')})`, deleteAccountIds)
+      for (const accountId of preservedAccountIds) {
+        const anonymizedAccount = `บัญชีส่วนตัวเดิม ${accountId}`
+        await connection.execute(`
+          UPDATE transactions SET
+            source_account = IF(source_account_id = ?, ?, source_account),
+            destination_account = IF(destination_account_id = ?, ?, destination_account)
+          WHERE family_id IS NOT NULL AND (source_account_id = ? OR destination_account_id = ?)
+        `, [accountId, anonymizedAccount, accountId, anonymizedAccount, accountId, accountId])
+        await connection.execute(`UPDATE money_accounts SET name = ?, opening_balance = 0, archived_at = COALESCE(archived_at, UTC_TIMESTAMP()) WHERE id = ?`, [anonymizedAccount, accountId])
+      }
+
+      await connection.execute(`
+        UPDATE transactions SET
+          owner_name = IF(owner_name = ?, 'สมาชิกที่ลบบัญชี', owner_name),
+          payer_name = IF(payer_name = ?, 'สมาชิกที่ลบบัญชี', payer_name),
+          recorder_name = IF(created_by_user_id = ? OR recorder_name = ?, 'สมาชิกที่ลบบัญชี', recorder_name)
+        WHERE family_id IS NOT NULL
+      `, [accountUser.display_name, accountUser.display_name, user.id, accountUser.display_name])
+      await connection.execute(`
+        UPDATE recurring_rules SET
+          owner_name = IF(owner_name = ?, 'สมาชิกที่ลบบัญชี', owner_name),
+          payer_name = IF(payer_name = ?, 'สมาชิกที่ลบบัญชี', payer_name)
+        WHERE owner_type = 'family'
+      `, [accountUser.display_name, accountUser.display_name])
+      const privateAccountRuleClause = preservedAccountIds.length
+        ? ` OR source_account_id IN (${preservedAccountIds.map(() => '?').join(',')}) OR destination_account_id IN (${preservedAccountIds.map(() => '?').join(',')})`
+        : ''
+      const privateAccountRuleParams = preservedAccountIds.length ? [...preservedAccountIds, ...preservedAccountIds] : []
+      await connection.execute(`
+        UPDATE recurring_rules SET paused_at = COALESCE(paused_at, UTC_TIMESTAMP())
+        WHERE owner_type = 'family' AND (owner_name = 'สมาชิกที่ลบบัญชี' OR payer_name = 'สมาชิกที่ลบบัญชี'${privateAccountRuleClause})
+      `, privateAccountRuleParams)
+      const [familyReviews] = await connection.execute(`
+        SELECT rr.id, rr.payload FROM recurring_reviews rr
+        JOIN recurring_rules r ON r.id = rr.recurring_rule_id WHERE r.owner_type = 'family'
+      `)
+      for (const review of familyReviews) {
+        const payload = typeof review.payload === 'string' ? JSON.parse(review.payload) : review.payload
+        let changed = false
+        for (const key of ['owner', 'payer', 'recorder']) {
+          if (payload?.[key] === accountUser.display_name) { payload[key] = 'สมาชิกที่ลบบัญชี'; changed = true }
+        }
+        if (changed) await connection.execute('UPDATE recurring_reviews SET payload = ? WHERE id = ?', [JSON.stringify(payload), review.id])
+      }
+      await connection.execute(`
+        UPDATE receipt_attachments SET original_name = 'สลิปของสมาชิกที่ลบบัญชี'
+        WHERE owner_user_id = ? AND family_id IS NOT NULL
+      `, [user.id])
+      await connection.execute('UPDATE family_invitations SET revoked_at = UTC_TIMESTAMP() WHERE invited_by_user_id = ? AND accepted_at IS NULL AND revoked_at IS NULL', [user.id])
+      await connection.execute(`UPDATE families f JOIN family_members fm ON fm.family_id = f.id AND fm.role = 'owner' AND fm.left_at IS NULL SET f.created_by_user_id = fm.user_id WHERE f.created_by_user_id = ?`, [user.id])
+      await connection.execute('UPDATE family_members SET left_at = UTC_TIMESTAMP() WHERE user_id = ? AND left_at IS NULL', [user.id])
+
+      const tombstoneEmail = `deleted+${user.id}@deleted.invalid`
+      const unusablePassword = await argon2.hash(randomBytes(48).toString('base64url'), { type: argon2.argon2id })
+      await connection.execute(`
+        UPDATE users SET email = ?, display_name = 'สมาชิกที่ลบบัญชี', password_hash = ?, system_role = 'user', email_verified_at = NULL, deleted_at = UTC_TIMESTAMP()
+        WHERE id = ?
+      `, [tombstoneEmail, unusablePassword, user.id])
+      await connection.execute('DELETE FROM user_sessions WHERE user_id = ?', [user.id])
+      await connection.execute('DELETE FROM account_tokens WHERE user_id = ?', [user.id])
+      await connection.commit()
+    } catch (error) {
+      await connection.rollback()
+      throw error
+    } finally { connection.release() }
+
+    await Promise.all(receiptKeys.map((key) => {
+      if (!/^[A-Za-z0-9._-]{1,128}$/.test(key)) return Promise.resolve()
+      return unlink(path.join(receiptDirectory, key)).catch((error) => {
+        if (error.code !== 'ENOENT') console.error('Personal receipt cleanup failed after account deletion')
+      })
+    }))
+    return send(response, 200, { message: 'ลบบัญชีและข้อมูลส่วนตัวแล้ว ประวัติครอบครัวยังคงอยู่โดยไม่เปิดเผยชื่อเดิม' }, { 'set-cookie': sessionCookie('', 0) })
   }
 
   if (method === 'GET' && pathname === '/api/auth/me') {
@@ -805,7 +982,7 @@ async function handle(request, response) {
     } catch (error) { await connection.rollback(); throw error } finally { connection.release() }
   }
 
-  const familyRoute = pathname.match(/^\/api\/families\/(\d+)(?:\/(invitations(?:\/(\d+))?|leave))?$/)
+  const familyRoute = pathname.match(/^\/api\/families\/(\d+)(?:\/(invitations(?:\/(\d+))?|leave|transfer-ownership))?$/)
   if (familyRoute && method !== 'GET') {
     const user = await currentUser(request)
     if (!user) return send(response, 401, { error: 'กรุณาเข้าสู่ระบบ' })
@@ -813,6 +990,26 @@ async function handle(request, response) {
     const action = familyRoute[2]?.startsWith('invitations') ? 'invitations' : familyRoute[2]
     const membership = user.families.find((family) => family.id === familyId)
     if (!membership) return send(response, 403, { error: 'คุณไม่มีสิทธิ์จัดการครอบครัวนี้' })
+    if (action === 'transfer-ownership' && method === 'POST') {
+      if (membership.role !== 'owner') return send(response, 403, { error: 'เฉพาะเจ้าของครอบครัวเท่านั้นที่โอนสิทธิ์ได้' })
+      const { userId: targetUserId } = await readJson(request)
+      if (!Number.isSafeInteger(Number(targetUserId)) || Number(targetUserId) < 1 || Number(targetUserId) === user.id) return send(response, 400, { error: 'เลือกสมาชิกปลายทางให้ถูกต้อง' })
+      const connection = await pool.getConnection()
+      try {
+        await connection.beginTransaction()
+        const [[ownerMembership]] = await connection.execute(`SELECT id FROM family_members WHERE family_id = ? AND user_id = ? AND role = 'owner' AND left_at IS NULL FOR UPDATE`, [familyId, user.id])
+        const [[targetMembership]] = await connection.execute(`SELECT id FROM family_members WHERE family_id = ? AND user_id = ? AND role = 'member' AND left_at IS NULL FOR UPDATE`, [familyId, Number(targetUserId)])
+        if (!ownerMembership || !targetMembership) {
+          await connection.rollback()
+          return send(response, 404, { error: 'ไม่พบสมาชิกที่สามารถรับโอนสิทธิ์ได้' })
+        }
+        await connection.execute(`UPDATE family_members SET role = 'member' WHERE id = ?`, [ownerMembership.id])
+        await connection.execute(`UPDATE family_members SET role = 'owner' WHERE id = ?`, [targetMembership.id])
+        await connection.execute('UPDATE families SET created_by_user_id = ? WHERE id = ?', [Number(targetUserId), familyId])
+        await connection.commit()
+        return send(response, 200, { message: 'โอนความเป็นเจ้าของครอบครัวแล้ว' })
+      } catch (error) { await connection.rollback(); throw error } finally { connection.release() }
+    }
     if (action === 'invitations' && method === 'POST') {
       if (membership.role !== 'owner') return send(response, 403, { error: 'เฉพาะเจ้าของครอบครัวเท่านั้นที่เชิญสมาชิกได้' })
       const token = randomBytes(32).toString('base64url')

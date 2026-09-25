@@ -4,7 +4,7 @@
 
 สถานะ ณ 25 กันยายน 2026: ระบบ API/หน้าใช้งานจริงครอบคลุมบัญชีเงิน หมวด รายการ รายงาน งบ การย้ายงบ รายการประจำ และสลิป OCR; migration 007 เพิ่ม action audit สำหรับการแบ่งรายการ หลัง integration check พบว่า enum เดิมทำให้ endpoint แบ่งรายการ rollback; ทดสอบใน MySQL จำลองแล้วผ่านการสร้างรายรับ/รายจ่าย/โอน แก้ยอด แบ่ง 2 ส่วน ย้ายถังขยะ/กู้คืน และตรวจยอดบัญชีรายรับรายจ่าย/โอนกับการปิดบังบัญชีสมาชิก; migration 007 deploy บน Podman แล้ว health check ผ่าน; Cloudflare Tunnel ยังคงปิด
 
-ยังไม่ถือว่าเสร็จ 100%: permission route inventory และ matrix ผ่านแล้ว (42/42 anonymous routes, 134 role assertions และ 20 assertions เพิ่มสำหรับ Super Admin); คำขอส่ง reset email จริง 1 ครั้งผ่าน API/SMTP หลังผู้ใช้อนุญาตแล้ว แต่ยังรอผู้ใช้ยืนยันการรับ; ตรวจคุณภาพ OCR กับสลิปจริงเมื่อผู้ใช้แนบภาพ; ตัดสินนโยบายลบบัญชีแล้วและบันทึกใน AGENT.md แต่ยังต้องพัฒนา flow/API/UI และทดสอบ; security gate ก่อนเปิดโดเมนยังไม่ผ่าน; ผู้ใช้ยืนยัน signup/login แล้ว; budget reset ไม่ยกยอดและ in-app alerts ทำงานแล้ว; worker สร้างรอบรายการประจำแบบ idempotent และผ่านการตรวจ restart ใน MySQL จำลอง; backup/restore dump+ไฟล์ภาพสังเคราะห์ผ่าน; ผู้ใช้ขอพักการตั้งค่าสำรองแบบเข้ารหัส/นอกเครื่อง/ตั้งเวลาไว้ก่อน; หน้าจอผ่านการทบทวน viewport มือถือและเดสก์ท็อปตามหลักฐานด้านล่าง; ทดสอบผู้ใช้ใหม่ที่ไม่มีครอบครัวบน MySQL ว่างและ deploy production build แล้ว
+ยังไม่ถือว่าเสร็จ 100%: permission route inventory และ matrix ผ่านแล้ว (42/42 anonymous routes, 134 role assertions และ 20 assertions เพิ่มสำหรับ Super Admin); คำขอส่ง reset email จริง 1 ครั้งผ่าน API/SMTP หลังผู้ใช้อนุญาตแล้ว แต่ยังรอผู้ใช้ยืนยันการรับ; ตรวจคุณภาพ OCR กับสลิปจริงเมื่อผู้ใช้แนบภาพ; นโยบายลบบัญชีและ flow/API/UI เสร็จและ deploy แล้ว; security gate ก่อนเปิดโดเมนยังไม่ผ่าน; ผู้ใช้ยืนยัน signup/login แล้ว; budget reset ไม่ยกยอดและ in-app alerts ทำงานแล้ว; worker สร้างรอบรายการประจำแบบ idempotent และผ่านการตรวจ restart ใน MySQL จำลอง; backup/restore dump+ไฟล์ภาพสังเคราะห์ผ่าน; ผู้ใช้ขอพักการตั้งค่าสำรองแบบเข้ารหัส/นอกเครื่อง/ตั้งเวลาไว้ก่อน; หน้าจอผ่านการทบทวน viewport มือถือและเดสก์ท็อปตามหลักฐานด้านล่าง; ทดสอบผู้ใช้ใหม่ที่ไม่มีครอบครัวบน MySQL ว่างและ deploy production build แล้ว
 
 ## เป้าหมาย: เชื่อมข้อมูลจริงครบทุกหน้าจอ
 
@@ -14,8 +14,8 @@
 
 | ส่วน | สถานะจริง | สิ่งที่ต้องทำต่อ |
 | --- | --- | --- |
-| Podman Compose / MySQL | รันบริการ `saving-*` และ migration ได้; backup script หยุด web/API อย่าง graceful, snapshot DB ขณะ API หยุด, health-check API ก่อน archive receipts, บันทึก SHA-256 และตรวจ hash ก่อน restore; รัน backup กับบริการปัจจุบันและกู้ backup ล่าสุดลง disposable MySQL/receipt volume/API สำเร็จ, migration 7 รายการครบ, health ผ่าน; บริการจริงกลับมา healthy และ HTTP 200 | สำรองนอกเครื่อง/เข้ารหัส, ตั้งเวลา/retention ตามคำตอบผู้ใช้ และทบทวน upgrade recovery |
-| ผู้ใช้ / ครอบครัว | สมัคร ยืนยันอีเมล login, เชิญด้วยลิงก์ใช้ครั้งเดียว และออกจากครอบครัวได้; หน้า Settings ส่งออก JSON เฉพาะโปรไฟล์และขอบเขตข้อมูลที่บัญชีมีสิทธิ์เข้าถึง; anonymous sweep 42 routes, role matrix 134 และ Super Admin boundary 20 assertions ผ่าน | ตัดสินนโยบายลบบัญชี/เก็บประวัติครอบครัว |
+| Podman Compose / MySQL | รันบริการ `saving-*` และ migration ได้; backup script หยุด web/API อย่าง graceful, snapshot DB ขณะ API หยุด, health-check API ก่อน archive receipts, บันทึก SHA-256 และตรวจ hash ก่อน restore; รัน backup กับบริการปัจจุบันและกู้ backup ล่าสุดลง disposable MySQL/receipt volume/API สำเร็จ, migration 7 รายการครบ, health ผ่าน; บริการจริงกลับมา healthy และ HTTP 200 | สำรองนอกเครื่อง/เข้ารหัส/ตั้งเวลา/retention พักไว้ตามผู้ใช้ขอ; ทบทวน upgrade recovery |
+| ผู้ใช้ / ครอบครัว | สมัคร ยืนยันอีเมล login, เชิญด้วยลิงก์ใช้ครั้งเดียว และออกจากครอบครัวได้; หน้า Settings ส่งออก JSON เฉพาะโปรไฟล์และขอบเขตข้อมูลที่บัญชีมีสิทธิ์เข้าถึง; anonymous sweep 42 routes, role matrix 134 และ Super Admin boundary 20 assertions ผ่าน; flow ลบบัญชีและ transfer ownership ผ่าน MySQL จำลอง 19 assertions และ deploy migration 008 แล้ว | ให้ผู้ใช้ตรวจรับ flow และความหมายข้อมูลก่อนเปิด domain |
 | รายรับ/รายจ่าย/โอน | CRUD, ถังขยะ/กู้คืน, audit, บัญชีและยอดคงเหลือ, idempotency key; โอนครอบครัวรวมถึงบัญชีสมาชิกได้; มี API/UI แบ่งหลายหมวด/เจ้าของและให้รายงาน/งบอ่านยอดแบ่ง; integration MySQL ล่าสุดยืนยันรายรับ 1,000, รายจ่าย 195.25, โอน 300 ไม่ปนรายรับ/รายจ่าย, retry ไม่ซ้ำ, split หมวดรวมตรง, ยอดบัญชี 5,504.75/350 และ trash/restore คืนยอดถูกต้อง | ตรวจการแก้ยอดหลังแบ่งหลายครั้งและ flows ผ่าน UI; concurrency ของ idempotency/งบ/recurring ผ่านแล้ว |
 | ภาพรวม / รายงาน | KPI และสรุปแยกหมวด/เจ้าของ/บัญชี query aggregate จาก MySQL; รายการและถังขยะแบ่งหน้าฝั่ง API, ค้นหา/ช่วงวัน/ชนิดรายการกรองบน server; CSV โหลดครบทุกหน้าที่ตรงตัวกรอง; ทดสอบ API ใน MySQL แยกด้วย 65 รายการ: 3 หน้า 30/30/5, ID ไม่ซ้ำ, ยอดรายรับ/จ่ายและหมวดตรงกับข้อมูลที่ใส่, ตัวกรองได้ 9 รายการ, ครอบครัวที่ไม่มีสิทธิ์ได้ 403; Podman UI ฐานข้อมูลจริงแสดงสถานะว่างปกติ |
 | บัญชีเงิน / หมวด / งบ | มี CRUD, opening balance, category, budget API, custom/monthly cycle, movement พร้อม row lock และหน้า history, เตือนตามเปอร์เซ็นต์; MySQL integration ยืนยันงบหลังย้ายวงเงิน: food 950/ใช้ 100, travel 550/ใช้ 95.25 และรายจ่ายโอนแยกจากยอดงบ; ย้ายงบพร้อมกันผ่าน 201/409 และเกิด movement เดียว | ตรวจหน้าบัญชี/งบบนมือถือและงบข้ามหลายรอบ |
@@ -108,7 +108,7 @@
 - [x] ตรวจมือถือและคอมพิวเตอร์, อินเทอร์เน็ตหลุด, MySQL หยุด/กลับมา, migration ผิดพลาด และข้อมูลว่าง (viewport 375×812/390×844, API offline UI, MySQL outage/recovery, migration fail-closed; ทดสอบ Podman web/API กับ MySQL ใหม่และผู้ใช้ไม่มีครอบครัวแล้ว หน้า Overview แสดงสถานะ MySQL เชื่อมต่อ, ยอด 0.00 และ empty state; แก้ให้ผู้ใช้ที่ไม่มีครอบครัวเริ่ม scope ส่วนตัว)
 - [x] มีสคริปต์สำรอง MySQL/ไฟล์แนบ และซ้อม restore dump+ไฟล์สังเคราะห์ไปยัง instance ชั่วคราว; ระบบสำรองแบบเข้ารหัส/นอกเครื่อง/ตั้งเวลาอยู่ในรายการเตรียมใช้งาน
 - [x] เพิ่มส่งออกข้อมูลบัญชี JSON พร้อม UI และจำกัด scope ที่ API; ภาพแนบรวม metadata และลิงก์ดาวน์โหลดที่ยังต้องเข้าสู่ระบบ
-- [x] ตัดสินนโยบายลบบัญชีแล้ว: ลบสิทธิ์และข้อมูลส่วนตัว คง/ทำชื่อสมาชิกในประวัติครอบครัวให้เป็นนิรนาม และให้เจ้าของโอนความเป็นเจ้าของก่อน; ยังต้องพัฒนา flow/API/UI และทดสอบการลบใน MySQL จำลอง
+- [x] พัฒนานโยบายและ flow ลบบัญชีครบ: ยืนยันรหัสผ่าน/คำยืนยัน, ลบรายการ/หมวด/งบ/ภาพส่วนตัว, เพิกถอน session/token, ทำชื่อครอบครัวเป็นนิรนาม, เก็บบัญชีที่ประวัติครอบครัวอ้างถึงเป็นบัญชีทั่วไปยอดตั้งต้นศูนย์, หยุดกติกาประจำที่พึ่งสมาชิกที่ลบ, บังคับโอนเจ้าของก่อน; ทดสอบ MySQL จำลองรวม 19 assertions, HTTP guard (owner 409/password 401/confirmation 400/session/login 401), owner transfer และกติกาประจำที่หยุดรอตรวจ; migration 008 deploy แล้ว
 - [x] ตรวจโดยไม่อ่านค่าแล้วว่า `.env` ไม่ถูก track และถูก ignore โดย Git
 - [ ] เปิด Cloudflare Tunnel เฉพาะเมื่อผู้ใช้ตรวจรับผลจริงและ security gate ผ่าน; เริ่มจากบัญชีที่อนุญาตก่อน
 
@@ -163,7 +163,7 @@
 - [x] API บังคับ role เจ้าของ/สมาชิกสำหรับข้อมูลรายการรวมถังขยะ; permission matrix ที่เหลือตรวจต่อในขั้น 8
 - [x] เพิ่ม JSON account export ในหน้าตั้งค่า ครอบคลุมโปรไฟล์ ครอบครัว บัญชี หมวด งบ รายการ/ถังขยะ ส่วนแบ่ง audit รายการประจำ และข้อมูลสลิป; ทดสอบ 65 รายการใน MySQL แยก, ยืนยัน Content-Disposition, ไม่รวม password hash และผู้ไม่ login ได้ 401
 - [x] ได้ข้อสรุปนโยบายลบบัญชีตาม AGENT.md แล้ว; รายการต้นแบบเดิมที่ไม่มีเจ้าของไม่แสดงให้บัญชีจริง
-- [ ] พัฒนาและทดสอบ flow ลบบัญชีที่ลบข้อมูลส่วนตัว/ภาพแนบ เพิกถอน session และ token คงประวัติครอบครัวแบบนิรนาม และบังคับโอนความเป็นเจ้าของก่อน
+- [x] พัฒนาและทดสอบ flow ลบบัญชีที่ลบข้อมูลส่วนตัว/ภาพแนบ เพิกถอน session และ token คงประวัติครอบครัวแบบนิรนาม และบังคับโอนความเป็นเจ้าของก่อน; production ใช้ migration 008 แล้ว
 - [x] จัดเก็บรายการใน MySQL และอ่านกลับหลังรีเฟรช
 - [x] สร้างครอบครัว เชิญด้วยลิงก์ใช้ครั้งเดียว หมดอายุและเพิกถอนได้ (ลิงก์มีอายุ 7 วัน)
 - [x] API บังคับสิทธิ์ข้อมูลส่วนตัว/ครอบครัว/บัญชีเงิน; audit matrix เพิ่มเติมอยู่ในขั้น 8
@@ -314,6 +314,6 @@
 - failure test migration บน disposable MySQL: ทำ `schema_migrations.version` สั้นกว่าชื่อ migration ให้ insert ล้ม; API exit code 1 ด้วย `ER_DATA_TOO_LONG` และ port health ไม่เปิด; ทดสอบ fail-closed โดยไม่แตะฐานข้อมูลจริง แล้วลบ container/network หลังตรวจ
 - ป้องกัน API ตอบ HTML/เครือข่ายหลุดทำให้หน้าเว็บแสดง parser error: ห่อคำขอ API 48 จุดให้แปลง transport error และ response ที่ไม่ใช่ JSON เป็น JSON error ที่ UI แสดงได้; Vite dev proxy ที่ upstream ปฏิเสธการเชื่อมต่อตอบ 502 แล้ว auth UI แสดงข้อความเชื่อมต่อไม่ได้; TypeScript/Vite build และ Podman web rebuild/deploy ผ่าน, production HTTP 200 และ `/api/health` รายงาน MySQL
 - ตรวจ reset-password email ด้วย disposable SMTP sink ที่รองรับ STARTTLS: `POST /api/auth/forgot-password` ได้ HTTP 202 และ sink บันทึกอีเมลจำลอง; ลบ stack, token และไฟล์ทดสอบแล้ว; การทดสอบนี้ไม่ยืนยันการส่งผ่าน Gmail ถึงกล่องจดหมายจริงและไม่มีอีเมลภายนอกถูกส่ง
-- ส่งคำขอ reset-password จริง 1 ครั้งไปยังอีเมลที่ผู้ใช้ระบุหลังได้รับอนุญาต; API ได้ HTTP 202 ผ่าน handler ที่รอผล SMTP sendMail แต่ยังต้องให้ผู้ใช้ยืนยันว่าอีเมลเข้ากล่องจดหมาย
-- งานที่ยังต้องปิด: ตรวจ OCR ด้วยสลิปจริงที่ผู้ใช้เลือกและอนุญาต (ผู้ใช้จะส่งภาพ); สำรองเข้ารหัส/นอกเครื่อง/อัตโนมัติพักตามผู้ใช้ขอ; ให้ผู้ใช้ทบทวนข้อมูลจริงและ security gate ก่อนเปิด domain
+- ส่ง reset-password email จริง 1 ครั้งไปยัง joepakpum@gmail.com หลังได้รับอนุญาต; API ได้ HTTP 202 หลังรอผล SMTP sendMail และไม่เปิดเผย token; รอผู้ใช้ยืนยันกล่องจดหมาย/Spam
+- งานที่ยังต้องปิด: ตรวจ OCR เมื่อได้รับสลิปจริงที่ผู้ใช้เลือก; สำรองเข้ารหัส/นอกเครื่อง/อัตโนมัติพักตามผู้ใช้ขอ; ผู้ใช้ต้องทบทวนข้อมูลจริงและ security gate ก่อนเปิด domain
 - Cloudflare Tunnel ยังคงปิด

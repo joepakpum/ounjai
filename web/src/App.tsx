@@ -149,7 +149,7 @@ function App() {
           method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ token: verifyToken, inviteToken: invitationToken }),
         })
         const result = await response.json() as { user?: AuthUser; error?: string }
-        if (active && response.ok && result.user) { setAuthUser(result.user); if (invitationToken) setInviteToken('') }
+        if (active && response.ok && result.user) { setSignedInUser(result.user); if (invitationToken) setInviteToken('') }
         if (active) setAuthMessage(response.ok ? 'ยืนยันอีเมลแล้ว บัญชีของคุณพร้อมใช้งาน' : result.error || 'ยืนยันอีเมลไม่สำเร็จ')
         cleanUrl()
       }
@@ -167,7 +167,7 @@ function App() {
             window.history.replaceState({}, '', `${window.location.pathname}${query ? `?${query}` : ''}`)
             if (joined.ok || joined.status === 409) setInviteToken('')
           }
-          setAuthUser(result.user)
+          setSignedInUser(result.user)
         } else if (active && response.status >= 500) setAuthMessage('ระบบยังเชื่อมต่อไม่ได้ กรุณาตรวจสอบอินเทอร์เน็ตแล้วลองใหม่')
       }
       if (active) setAuthChecked(true)
@@ -767,11 +767,17 @@ function App() {
     setTransactions([])
   }
 
+  function setSignedInUser(user: AuthUser) {
+    setAuthUser(user)
+    setScope(user.families.length ? 'family' : 'personal')
+    if (!user.families.some((family) => family.id === activeFamilyId)) setActiveFamilyId(user.families[0]?.id ?? null)
+  }
+
   async function refreshFamilies() {
     const response = await apiFetch('/api/families')
     if (response.ok) setFamilyInfo(await response.json() as FamilyInfo[])
     const me = await apiFetch('/api/auth/me')
-    if (me.ok) setAuthUser((await me.json() as { user: AuthUser }).user)
+    if (me.ok) setSignedInUser((await me.json() as { user: AuthUser }).user)
   }
 
   async function createInvitation(familyId: number) {
@@ -802,14 +808,14 @@ function App() {
     if (inviteToken) {
       const response = await apiFetch('/api/families/invitations/accept', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ token: inviteToken }) })
       const result = await response.json() as { user?: AuthUser; error?: string }
-      if (!response.ok && response.status !== 409) { setAuthMessage(result.error || 'เข้าร่วมครอบครัวไม่สำเร็จ'); setAuthUser(user); return }
+      if (!response.ok && response.status !== 409) { setAuthMessage(result.error || 'เข้าร่วมครอบครัวไม่สำเร็จ'); setSignedInUser(user); return }
       setInviteToken('')
       window.history.replaceState({}, '', window.location.pathname)
       if (result.user) user = result.user
       else { const me = await apiFetch('/api/auth/me'); if (me.ok) user = (await me.json() as { user: AuthUser }).user }
       setAuthMessage('เข้าร่วมครอบครัวแล้ว')
     }
-    setAuthUser(user)
+    setSignedInUser(user)
   }
 
   if (!authChecked) return <AuthShell><div className="auth-loading">กำลังตรวจสอบบัญชี…</div></AuthShell>

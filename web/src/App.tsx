@@ -768,8 +768,10 @@ function App() {
   }
 
   function setSignedInUser(user: AuthUser) {
+    const alreadyHadFamilyAccess = Boolean(authUser?.families.length)
     setAuthUser(user)
-    setScope(user.families.length ? 'family' : 'personal')
+    if (!user.families.length) setScope('personal')
+    else if (!alreadyHadFamilyAccess) setScope('family')
     if (!user.families.some((family) => family.id === activeFamilyId)) setActiveFamilyId(user.families[0]?.id ?? null)
   }
 

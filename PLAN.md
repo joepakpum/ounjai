@@ -325,3 +325,7 @@
 - Refactor `web/src/App.tsx` ให้ lint ผ่านโดยไม่มี warning; ยืนยัน production build ผ่านในรอบ verification
 - Preflight ปฏิเสธ domain ตัวอย่าง/โดเมน reserved และ URL ที่ฝัง credentials เพิ่มเติม; ทดสอบด้วยค่าจำลองเท่านั้น ไม่มีการเปิด Tunnel
 - ผู้ใช้ขอพักการตัดสินใจเรื่องปลายทาง/การเข้ารหัส/กุญแจ/ตารางเวลา/retention ของ backup และจะทดสอบ OCR ด้วยสลิปของตนเองในแอป; สองหัวข้อนี้จึงยังไม่ถูกประกาศว่าปิดแล้ว
+- แก้ปัญหาอัปโหลดภาพ: Nginx จำกัด request body ที่ 1 MB แม้ API/หน้าเว็บอนุญาตภาพถึง 6 MB; เพิ่ม limit เป็น 9 MB, จัดการ response HTML/error จาก proxy ให้อ่านได้, และแสดงชนิดไฟล์ที่รองรับชัดเจน; integration ผ่าน proxy อัปโหลด/อ่าน/ลบภาพ 1.2 MB ได้สำเร็จ
+- เพิ่ม `.gitattributes` บังคับ LF ให้ shell/envsh scripts เพราะ checkout แบบ CRLF ทำให้ Nginx entrypoint script เริ่มไม่ได้ใน image ที่ build บน Windows; build/start web container ผ่าน
+- อัปเดตเฉพาะ `saving-web` หลังทดสอบ; `/api/health` ตอบ `ok` และ MySQL; ไม่ลบ volume และไม่ได้เปิด Tunnel
+- เพิ่มขั้นตอนหลังแก้โค้ด/ปิดงานใน `OPERATIONS.md` รวมกรณีแก้เว็บ/API/Compose และคำสั่งทดสอบ/ตรวจ health

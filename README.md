@@ -27,7 +27,7 @@ Compose สร้าง `saving-web`, `saving-api` และ `saving-mysql`; ฐ
 
 ## ตรวจสอบก่อนส่งการเปลี่ยนแปลง
 
-บน Windows/PowerShell ให้รัน `./scripts/verify.ps1` จาก repository root คำสั่งนี้ตรวจ API, preflight ของ Tunnel, integration บน MySQL ที่สร้างแยกพร้อมข้อมูลจำลอง, lint/build หน้าเว็บ และ Compose configuration; ชุด integration ลบ container/network/volume ของตัวเองเมื่อจบ ดูผลรีวิวและรายการที่ยังรอการตัดสินใจใน [REVIEW_PLAN.md](REVIEW_PLAN.md)
+บน Windows/PowerShell ให้รัน `./scripts/verify.ps1` จาก repository root คำสั่งนี้ตรวจ API, preflight ของ Tunnel, integration บน MySQL ที่สร้างแยกพร้อมข้อมูลจำลอง (รวมการอัปโหลดภาพขนาดเกิน 1 MB ผ่าน Nginx), lint/build หน้าเว็บ และ Compose configuration; ชุด integration ลบ container/network/volume ของตัวเองเมื่อจบ ดูขั้นตอนหลังแก้โค้ดและปิดงานใน [OPERATIONS.md](OPERATIONS.md) และรายการรีวิวที่ยังรอการตัดสินใจใน [REVIEW_PLAN.md](REVIEW_PLAN.md)
 
 ## สำรองและกู้คืน
 

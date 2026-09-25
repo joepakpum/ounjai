@@ -55,7 +55,7 @@ services:
       MYSQL_USER: integration_app
       MYSQL_PASSWORD: integration-app-password-only
       APP_BASE_URL: http://localhost:5173
-      API_BASE_URL: http://api:3000
+      API_BASE_URL: http://web:8080
       TEST_PASSWORD: Integration-test-password-2026
       TZ: Asia/Bangkok
     volumes:
@@ -63,6 +63,21 @@ services:
     depends_on:
       api:
         condition: service_healthy
+      web:
+        condition: service_healthy
+
+  web:
+    build:
+      context: ./web
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/ || exit 1"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
 
 volumes:
   integration_mysql_data:

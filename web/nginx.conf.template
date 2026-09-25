@@ -12,6 +12,7 @@ server {
     add_header Permissions-Policy "camera=(), microphone=(), geolocation=()" always;
 
     location /api/ {
+        client_max_body_size 9m;
         set $api_upstream api:3000;
         proxy_pass http://$api_upstream$request_uri;
         proxy_http_version 1.1;

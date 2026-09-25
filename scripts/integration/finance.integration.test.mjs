@@ -20,7 +20,7 @@ async function request(path, { method = 'GET', body, cookie } = {}) {
   if (body !== undefined) headers['content-type'] = 'application/json'
   if (cookie) headers.cookie = cookie
   const response = await fetch(`${api}${path}`, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) })
-  const json = await response.json()
+  const json = response.headers.get('content-type')?.includes('application/json') ? await response.json() : { raw: await response.text() }
   return { response, json, cookie: response.headers.get('set-cookie')?.split(';')[0] || cookie }
 }
 
@@ -131,6 +131,20 @@ test('family ledger, role isolation, and member account deletion', async () => {
     },
   })
   assert.equal(personalExpense.response.status, 201, personalExpense.json.error)
+
+  const largeReceiptBytes = Buffer.alloc(1_200_000, 0x41)
+  largeReceiptBytes.set([0xff, 0xd8, 0xff], 0)
+  const largeReceipt = await request('/api/receipts', {
+    method: 'POST', cookie: memberCookie,
+    body: { fileName: 'receipt.jpg', mimeType: 'image/jpeg', data: `data:image/jpeg;base64,${largeReceiptBytes.toString('base64')}`, scope: 'personal' },
+  })
+  assert.equal(largeReceipt.response.status, 201, largeReceipt.json.error || largeReceipt.json.raw)
+  assert.ok(largeReceipt.json.id)
+  const receiptContent = await request(`/api/receipts/${largeReceipt.json.id}/content`, { cookie: memberCookie })
+  assert.equal(receiptContent.response.status, 200)
+  assert.equal(Number(receiptContent.response.headers.get('content-length')), largeReceiptBytes.length)
+  const receiptDelete = await request(`/api/receipts/${largeReceipt.json.id}`, { method: 'DELETE', cookie: memberCookie, body: {} })
+  assert.equal(receiptDelete.response.status, 200, receiptDelete.json.error)
 
   const deleted = await request('/api/auth/delete-account', { method: 'POST', cookie: memberCookie, body: { password, confirmation: 'ลบบัญชี' } })
   assert.equal(deleted.response.status, 200, deleted.json.error)

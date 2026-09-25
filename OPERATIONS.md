@@ -57,6 +57,40 @@ Do not start the `tunnel` profile until the owner has approved public access and
 
 The Compose `tunnel-preflight` service also gates `cloudflared` when the profile is started directly. The gate checks HTTPS, secure cookies, separate long database passwords, a token, SMTP transport settings, and a valid Super Admin email. It reports setting names only and never prints their values. Stop public access with `./scripts/tunnel.ps1 -Action stop`.
 
+## ขั้นตอนหลังแก้ไขโค้ดและก่อนปิดงาน
+
+### ต้อง build ใหม่หรือไม่
+
+- แก้เฉพาะ Markdown/เอกสาร: ไม่ต้อง build container
+- แก้ `web/src`, CSS, asset, `web/Dockerfile`, Nginx config หรือ dependency ของเว็บ: `podman compose build web` แล้ว `podman compose up -d --no-deps web`
+- แก้ `api/server.js`, `api/migrations`, `api/Dockerfile` หรือ dependency API: `podman compose build api` แล้ว `podman compose up -d --no-deps api`; API จะรัน migrations ตอนเริ่มระบบ
+- แก้ `compose.yaml`, `.env` หรือบริการ/การตั้งค่า container: รัน `podman compose up --build -d` เพื่อให้ Compose สร้าง image และปรับ container ตาม config
+- เปลี่ยน schema ห้ามลบ volume ฐานข้อมูลเพื่อบังคับให้เริ่มใหม่ ให้เพิ่ม migration แล้วตรวจ backup/restore ตามนโยบายก่อน
+
+แยก `build` ออกจาก `up --no-deps` สำหรับการเปลี่ยนโค้ดบริการเดียว เพื่อไม่ให้ Compose ต้องตรวจ/รีสตาร์ต dependency ที่ไม่เกี่ยวข้อง การใช้ `podman compose up --build -d` แบบรวมสะดวกเมื่อต้องอัปเดต stack ทั้งหมด แต่อาจสร้าง image หรือแทนที่ container ของ dependency ที่ Compose เห็นว่า config เปลี่ยน ฐานข้อมูลคงอยู่ใน named volume ตราบใดที่ไม่ได้สั่ง `down --volumes` หรือ `volume rm` ส่วนการแก้เอกสารอย่างเดียวไม่ต้อง build
+
+### Checklist ปิดงาน
+
+รันจาก PowerShell ที่ repository root:
+
+```powershell
+git diff --check
+./scripts/verify.ps1
+# ตัวอย่างเมื่อแก้เว็บ
+podman compose build web
+podman compose up -d --no-deps web
+podman compose ps
+Invoke-RestMethod http://localhost:5173/api/health
+podman compose logs --tail 100 web api
+git status --short
+```
+
+เมื่อแก้ API ให้แทนสองคำสั่ง build/up ด้วย `podman compose build api` และ `podman compose up -d --no-deps api`; เมื่อแก้ทั้งคู่ ให้ build ทั้ง `web api` และสั่ง `up -d --no-deps api web`.
+
+จากนั้นเปิดแอปใน browser ทดสอบหน้าหรือ flow ที่เปลี่ยนจริง รวมถึงการเลือกภาพจากคลังภาพ/ถ่ายภาพเมื่อแตะฟังก์ชันสลิป ตรวจว่าแสดงผลสแกนหรือข้อความ error ที่อ่านเข้าใจได้ แล้วบันทึกรายการทดสอบเฉพาะข้อมูลจำลองและลบทิ้งเมื่อเสร็จ ตรวจ diff อีกครั้งก่อน commit/push. `scripts/verify.ps1` ใช้ MySQL ชั่วคราวและลบ volumes ทดสอบเอง; ห้ามส่งฐานข้อมูลจริงหรือไฟล์ข้อมูลผู้ใช้เข้า test fixture.
+
+ถ้าเปลี่ยนเฉพาะเว็บ/API แล้วไม่อยากอัปเดต service อื่น ให้ใช้คำสั่ง build เฉพาะ service ด้านบนแทนคำสั่งรวม. อย่าเปิด Cloudflare Tunnel เป็นส่วนหนึ่งของ checklist; ต้องผ่าน gate และได้รับอนุมัติแยกก่อนเสมอ.
+
 ## Current limitations
 
 - A backup was restored into a disposable MySQL container and the schema migrations and row counts matched. A synthetic receipt was uploaded, attached, archived with a database dump, deleted, then both files were restored into new MySQL/API/volume containers; authenticated download and SHA-256 matched. The live backup had no receipt rows or images, so visual/OCR quality with a real receipt remains unverified.

@@ -236,8 +236,9 @@
 - [x] ตรวจสิทธิ์ผู้ใช้ สมาชิก เจ้าของครอบครัว สมาชิกที่ออก และ Super Admin ทั้งข้อมูลรายการและภาพ (ทบทวนทุก route ใน `api/server.js`; anonymous sweep 42/42 routes, permission matrix 134 assertions และ Super Admin 20 assertions ใน MySQL/API จำลอง ครอบคลุมข้อมูลส่วนตัว/ครอบครัว, private-account masking, export, รายการ/ประวัติ/allocations, receipt, category, budget, recurring, invitation และ leave; ยังต้องทบทวนบัญชีจริงก่อนเปิดโดเมน)
 - [x] ตรวจ API ถังขยะ/กู้คืนและ audit, คำขอซ้ำทั้งแบบปกติและ concurrent, และ failure injection กลาง transaction โอน: บังคับ audit insert ล้มแล้วได้ HTTP 500 JSON, ไม่มี transaction ค้าง และยอดบัญชีต้นทาง/ปลายทางคง 100/25 บาท
 - [x] เตรียมฐานข้อมูลจริง การตั้งค่าบริการ สำรองและกู้คืนข้อมูล พร้อมขั้นตอนติดตั้ง; มีขั้นตอน Podman Compose ใน README, backup/restore และตรวจ checksum ใน OPERATIONS.md; รัน backup จริงและ restore ลง disposable stack แล้ว health check ผ่าน
+- [x] บันทึกขอบเขตค่าใช้จ่ายและข้อจำกัด: แอป self-host ด้วย Podman/MySQL และ OCR Tesseract ในเครื่อง ไม่มีค่าบริการ OCR ต่อภาพ; Cloudflare Tunnel ระบุว่าใช้ได้ทุกแผน แต่ไม่ทราบค่าโดเมน/แผนบัญชีหรือค่าโฮสต์ ไฟฟ้า เครือข่าย และพื้นที่สำรองของเครื่องนี้ จึงยังระบุยอดรวมรายเดือนไม่ได้; Gmail มีข้อจำกัดการส่งตามชนิดบัญชี (บัญชีมาตรฐานมีเพดาน 500 ข้อความต่อวัน); แหล่งข้อมูล: [Cloudflare Tunnel](https://developers.cloudflare.com/tunnel/) และ [Gmail sending limits](https://support.google.com/mail/answer/22839?hl=en)
 - [ ] ทบทวนกับผู้ใช้โดยใช้รายการจริงที่ผู้ใช้เลือกให้ ก่อนเปิดใช้งานจริง
-- [ ] สรุปผลตรวจรับ ค่าใช้บริการที่เกี่ยวข้อง และข้อจำกัดที่ยังมี
+- [x] สรุปผลตรวจรับ ค่าใช้บริการที่เกี่ยวข้อง และข้อจำกัดที่ยังมีไว้ใน README และแผนนี้; ยังไม่ใช่ใบเสนอราคารายเดือน เพราะไม่ทราบต้นทุนโฮสต์/โดเมน/สำรองและไม่มีการเชื่อม billing ของผู้ให้บริการ
 
 เกณฑ์เสร็จ: ข้อกำหนดใน AGENT.md ครบทุกข้อ กรณีตรวจรับสำคัญผ่าน และไม่มีการแสดงข้อมูลจำลองเป็นระบบจริง
 

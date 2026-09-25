@@ -46,8 +46,20 @@ Invoke-RestMethod http://localhost:5173/api/health
 
 Replace `YYYYMMDD-HHMMSS` with the chosen backup folder. Do not restore an unknown dump. MySQL and receipt files must come from the same backup folder. After recovery, inspect accounts, transactions, and receipt images before reconnecting any public tunnel.
 
+## Cloudflare Tunnel preflight
+
+Do not start the `tunnel` profile until the owner has approved public access and all security-gate items are closed. After approval, put production values in the ignored `.env` file and run:
+
+```powershell
+.\scripts\tunnel.ps1 -Action validate
+.\scripts\tunnel.ps1 -Action start
+```
+
+The Compose `tunnel-preflight` service also gates `cloudflared` when the profile is started directly. The gate checks HTTPS, secure cookies, separate long database passwords, a token, SMTP transport settings, and a valid Super Admin email. It reports setting names only and never prints their values. Stop public access with `./scripts/tunnel.ps1 -Action stop`.
+
 ## Current limitations
 
 - A backup was restored into a disposable MySQL container and the schema migrations and row counts matched. A synthetic receipt was uploaded, attached, archived with a database dump, deleted, then both files were restored into new MySQL/API/volume containers; authenticated download and SHA-256 matched. The live backup had no receipt rows or images, so visual/OCR quality with a real receipt remains unverified.
 - Backups are not encrypted by the script. Protect them with encrypted host storage and access controls.
 - There is no automated scheduler or offsite backup destination configured by the application.
+- The user has deferred backup destination, encryption/key custody, schedule, and retention decisions; do not treat the local backup script as a complete disaster-recovery setup.

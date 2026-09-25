@@ -25,19 +25,34 @@ Compose สร้าง `saving-web`, `saving-api` และ `saving-mysql`; ฐ
 - ตั้งรายการประจำแบบรอตรวจ แก้ไขก่อนยืนยัน และรับการเตือนงบในแอป
 - ใช้ถังขยะ ประวัติการแก้ไข และส่งออกข้อมูลบัญชีเป็น JSON
 
+## ตรวจสอบก่อนส่งการเปลี่ยนแปลง
+
+บน Windows/PowerShell ให้รัน `./scripts/verify.ps1` จาก repository root คำสั่งนี้ตรวจ API, preflight ของ Tunnel, integration บน MySQL ที่สร้างแยกพร้อมข้อมูลจำลอง, lint/build หน้าเว็บ และ Compose configuration; ชุด integration ลบ container/network/volume ของตัวเองเมื่อจบ ดูผลรีวิวและรายการที่ยังรอการตัดสินใจใน [REVIEW_PLAN.md](REVIEW_PLAN.md)
+
 ## สำรองและกู้คืน
 
 สร้าง backup ด้วย `./scripts/backup.ps1` จาก PowerShell ที่ repository root ดูขั้นตอนตรวจ checksum และกู้คืนใน [OPERATIONS.md](OPERATIONS.md) สคริปต์สร้าง dump ฐานข้อมูล, archive ภาพสลิป และ manifest; เก็บ backup ไว้ใน encrypted storage ที่จำกัดสิทธิ์ การเข้ารหัส การส่งออกนอกเครื่อง และตารางเวลาอัตโนมัติยังต้องตั้งค่าภายนอก
 
 ## เตรียมใช้งานผ่านโดเมน
 
-Cloudflare Tunnel ถูกแยกไว้ใน Compose profile `tunnel` และยังคงปิด จนกว่าจะตรวจ security gate ใน [PLAN.md](PLAN.md) และเจ้าของระบบยืนยันให้เปิด เมื่อถึงขั้นนั้น ให้ตั้งรหัสผ่าน MySQL ใหม่, `APP_BASE_URL` เป็น HTTPS domain, `COOKIE_SECURE=true`, ตั้ง SMTP และใส่ `CLOUDFLARE_TUNNEL_TOKEN` ใน `.env` โดยห้าม commit ไฟล์นี้ ปลายทาง Tunnel ควรชี้ไปที่ `http://web:8080` ภายใน Compose network
+Cloudflare Tunnel อยู่ใน Compose profile `tunnel` และยังปิดอยู่ ห้ามเปิดก่อนผ่าน security gate ใน [PLAN.md](PLAN.md) และเจ้าของระบบยืนยันให้เปิด เมื่อได้รับอนุญาตแล้ว ให้ตั้ง `APP_BASE_URL` เป็น HTTPS domain, `COOKIE_SECURE=true`, รหัสผ่าน MySQL สองค่าที่ต่างกันและยาวอย่างน้อย 24 ตัวอักษร, SMTP, `SYSTEM_ADMIN_EMAIL` และ `CLOUDFLARE_TUNNEL_TOKEN` ใน `.env`; ห้าม commit ไฟล์นี้
+
+เริ่ม Tunnel ผ่านสคริปต์ที่ตรวจค่าตั้งต้นก่อนเสมอ:
+
+```powershell
+.\scripts\tunnel.ps1 -Action validate
+.\scripts\tunnel.ps1 -Action start
+# เมื่อปิดการเข้าถึงสาธารณะ
+.\scripts\tunnel.ps1 -Action stop
+```
+
+Compose ยังเรียก preflight service เป็น dependency ก่อนเริ่ม `cloudflared` แม้สั่ง Compose โดยตรง โดยปฏิเสธ URL ที่ไม่ใช่ HTTPS, cookie ที่ไม่ Secure, รหัสฐานข้อมูลเริ่มต้น/สั้น/ซ้ำ, token ว่าง, SMTP ที่ไม่ครบหรือ TLS ไม่ตรงกับ port และอีเมล Super Admin ที่ไม่ถูกต้อง ปลายทาง Tunnel ต้องชี้ไป `http://web:8080` ภายใน Compose network
 
 ## ข้อจำกัดที่ยังเปิดอยู่
 
 - ทดสอบ permission matrix ครบแล้วใน API และ MySQL จำลอง แต่ยังรอ security gate และการตรวจรับข้อมูลจริงก่อนเปิดให้เข้าผ่านโดเมน
 - ส่ง reset-password email ทดสอบจริง 1 ครั้งหลังผู้ใช้อนุญาต; API ส่งผ่าน SMTP แล้ว แต่ยังต้องให้ผู้ใช้ยืนยันว่าอีเมลเข้ากล่องจดหมาย
-- OCR ผ่านภาพสังเคราะห์แล้ว แต่ยังไม่มีสลิปจริงที่ผู้ใช้อนุญาตให้ใช้ตรวจคุณภาพ
+- OCR ผ่านภาพสังเคราะห์แล้ว; ผู้ใช้จะทดลองกับสลิปจริงด้วยตนเองในแอป การตรวจคุณภาพจากภาพนั้นยังไม่ได้รับการยืนยันจากเรา
 - นโยบายและ flow ลบบัญชีพร้อมใช้งาน: ลบข้อมูลส่วนตัว/สิทธิ์เข้าระบบ คงประวัติครอบครัวแบบนิรนาม; ต้องโอนเจ้าของครอบครัวก่อน และกติกาประจำที่พึ่งบัญชี/ชื่อของผู้ลบจะหยุดรอตรวจ
 - Backup ยังไม่มีการเข้ารหัส ปลายทางนอกเครื่อง หรือ scheduler ที่ตั้งค่าไว้
 - ค่าใช้จ่ายจริงยังคำนวณไม่ได้เพราะติดตั้งแบบ self-hosted และไม่มีข้อมูลค่าเครื่อง/ไฟฟ้า/อินเทอร์เน็ต/โดเมน/พื้นที่เก็บ; OCR ใช้ Tesseract ในเครื่อง ไม่เรียกบริการ OCR แบบคิดค่าภาพ

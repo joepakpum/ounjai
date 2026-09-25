@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ChangeEvent, FormEvent, ReactNode } from 'react'
 import {
   ArrowDownLeft, ArrowDownRight, ArrowLeftRight, ArrowUpRight, Banknote,
@@ -59,16 +59,18 @@ async function apiFetch(input: RequestInfo | URL, init?: RequestInit): Promise<R
 
 function App() {
   const [transactions, setTransactions] = useState<Transaction[]>([])
-  const [transactionPage, setTransactionPage] = useState(1)
+  const [transactionPageSelection, setTransactionPageSelection] = useState<{ filterKey: string; page: number }>({ filterKey: '', page: 1 })
   const [transactionPageInfo, setTransactionPageInfo] = useState<TransactionPageInfo>({ page: 1, pageSize: 30, total: 0, totalPages: 0 })
-  const [reportSummary, setReportSummary] = useState<ReportSummary | null>(null)
-  const [transactionsLoading, setTransactionsLoading] = useState(false)
-  const [reportLoading, setReportLoading] = useState(false)
+  const [reportSummaryEntry, setReportSummaryEntry] = useState<{ key: string; summary: ReportSummary } | null>(null)
+  const [transactionsLoadedKey, setTransactionsLoadedKey] = useState<string | null>(null)
+  const [reportCompletedKey, setReportCompletedKey] = useState<string | null>(null)
   const [authUser, setAuthUser] = useState<AuthUser | null>(null)
+  const authUserRef = useRef<AuthUser | null>(null)
+  const activeFamilyIdRef = useRef<number | null>(null)
   const [authChecked, setAuthChecked] = useState(false)
   const [authMessage, setAuthMessage] = useState('')
-  const [resetToken, setResetToken] = useState('')
-  const [inviteToken, setInviteToken] = useState('')
+  const [resetToken] = useState(() => new URLSearchParams(window.location.search).get('reset') || '')
+  const [inviteToken, setInviteToken] = useState(() => new URLSearchParams(window.location.search).get('invite') || '')
   const [familyInfo, setFamilyInfo] = useState<FamilyInfo[]>([])
   const [moneyAccounts, setMoneyAccounts] = useState<MoneyAccount[]>([])
   const [categoryItems, setCategoryItems] = useState<Category[]>([])
@@ -113,12 +115,10 @@ function App() {
   const [formAmount, setFormAmount] = useState('')
   const [formTitle, setFormTitle] = useState('')
   const [formDate, setFormDate] = useState(bangkokToday())
-  const [formCategory, setFormCategory] = useState('อาหาร')
-  const [formCategoryId, setFormCategoryId] = useState('')
-  const [formAccount, setFormAccount] = useState('เงินสด')
-  const [formAccountId, setFormAccountId] = useState('')
-  const [formDestination, setFormDestination] = useState('')
-  const [formDestinationId, setFormDestinationId] = useState('')
+  const [formCategoryChoice, setFormCategoryChoice] = useState('อาหาร')
+  const [formCategoryIdChoice, setFormCategoryIdChoice] = useState('')
+  const [formAccountIdChoice, setFormAccountIdChoice] = useState('')
+  const [formDestinationIdChoice, setFormDestinationIdChoice] = useState('')
   const [accountDialog, setAccountDialog] = useState(false)
   const [accountName, setAccountName] = useState('')
   const [accountType, setAccountType] = useState<'cash' | 'bank' | 'other'>('bank')
@@ -130,14 +130,25 @@ function App() {
   const receiptUploadSequence = useRef(0)
   const manuallyEditedReceiptFields = useRef({ title: false, amount: false, date: false, category: false })
 
+  const setSignedInUser = useCallback((user: AuthUser) => {
+    const alreadyHadFamilyAccess = Boolean(authUserRef.current?.families.length)
+    authUserRef.current = user
+    setAuthUser(user)
+    if (!user.families.length) setScope('personal')
+    else if (!alreadyHadFamilyAccess) setScope('family')
+    if (!user.families.some((family) => family.id === activeFamilyIdRef.current)) {
+      const nextFamilyId = user.families[0]?.id ?? null
+      activeFamilyIdRef.current = nextFamilyId
+      setActiveFamilyId(nextFamilyId)
+      if (!nextFamilyId) setTransferRecipientAccounts([])
+    }
+  }, [])
+
   useEffect(() => {
     let active = true
     const params = new URLSearchParams(window.location.search)
     const verifyToken = params.get('verify')
-    const passwordToken = params.get('reset')
     const invitationToken = params.get('invite') || ''
-    if (invitationToken) setInviteToken(invitationToken)
-    if (passwordToken) setResetToken(passwordToken)
     const cleanUrl = () => {
       params.delete('verify'); params.delete('reset'); params.delete('invite')
       const query = params.toString()
@@ -174,15 +185,15 @@ function App() {
     }
     restoreSession().catch(() => { if (active) setAuthChecked(true) })
     return () => { active = false }
-  }, [])
+  }, [setSignedInUser])
 
   useEffect(() => {
-    if (!authUser) { setFamilyInfo([]); return }
+    if (!authUser) return
     apiFetch('/api/families').then((response) => response.ok ? response.json() as Promise<FamilyInfo[]> : []).then(setFamilyInfo).catch(() => setFamilyInfo([]))
   }, [authUser])
 
   useEffect(() => {
-    if (!authUser) { setMoneyAccounts([]); setCategoryItems([]); return }
+    if (!authUser) return
     let active = true
     const scopes = [
       { scope: 'personal', familyId: null },
@@ -199,7 +210,7 @@ function App() {
   }, [authUser, activeFamilyId, financeVersion])
 
   useEffect(() => {
-    if (!authUser) { setBudgets([]); return }
+    if (!authUser) return
     const query = new URLSearchParams({ scope })
     if (scope === 'family' && activeFamilyId) query.set('familyId', String(activeFamilyId))
     apiFetch(`/api/budgets?${query}`).then(async (response) => {
@@ -209,7 +220,7 @@ function App() {
   }, [authUser, scope, activeFamilyId, financeVersion])
 
   useEffect(() => {
-    if (!authUser) { setBudgetMovements([]); return }
+    if (!authUser) return
     const query = new URLSearchParams({ scope })
     if (scope === 'family' && activeFamilyId) query.set('familyId', String(activeFamilyId))
     apiFetch(`/api/budgets/movements?${query}`).then(async (response) => {
@@ -219,7 +230,7 @@ function App() {
   }, [authUser, scope, activeFamilyId, financeVersion])
 
   useEffect(() => {
-    if (!authUser) { setRecurringRules([]); setRecurringReviews([]); return }
+    if (!authUser) return
     const query = new URLSearchParams({ scope })
     if (scope === 'family' && activeFamilyId) query.set('familyId', String(activeFamilyId))
     let active = true
@@ -233,7 +244,7 @@ function App() {
   }, [authUser, scope, activeFamilyId, financeVersion])
 
   useEffect(() => {
-    if (!authUser || !activeFamilyId) { setTransferRecipientAccounts([]); return }
+    if (!authUser || !activeFamilyId) return
     let active = true
     apiFetch(`/api/families/${activeFamilyId}/transfer-recipients`).then(async (response) => {
       if (!response.ok) throw new Error('โหลดบัญชีผู้รับโอนไม่สำเร็จ')
@@ -247,34 +258,25 @@ function App() {
     return formScope === 'family' ? accounts.sort((left, right) => Number(right.ownerType === 'family') - Number(left.ownerType === 'family')) : accounts
   }, [moneyAccounts, formScope, activeFamilyId, authUser])
   const formCategories = useMemo(() => categoryItems.filter((category) => category.kind === formKind && category.ownerType === (formScope === 'family' ? 'family' : 'user') && category.ownerRef === (formScope === 'family' ? activeFamilyId : authUser?.id)), [categoryItems, formKind, formScope, activeFamilyId, authUser])
-
-  useEffect(() => {
-    if (!formAccounts.some((account) => String(account.id) === formAccountId)) {
-      const first = formAccounts[0]
-      setFormAccountId(first ? String(first.id) : '')
-      setFormAccount(first?.name || '')
-    }
-    const destinations = formScope === 'family' ? [...formAccounts, ...transferRecipientAccounts.map((account) => ({ ...account, ownerType: 'user' as const, ownerUserId: null, familyId: null, name: `${account.ownerName} · ${account.accountType === 'cash' ? 'เงินสด' : account.accountType === 'bank' ? 'บัญชีธนาคาร' : 'บัญชีอื่น'}`, balance: 0, openingBalance: 0, openingDate: '' }))] : formAccounts
-    if (formKind === 'transfer' && !destinations.some((account) => String(account.id) === formDestinationId)) {
-      const other = destinations.find((account) => String(account.id) !== formAccountId)
-      setFormDestinationId(other ? String(other.id) : '')
-      setFormDestination(other?.name || '')
-    }
-    if (formKind !== 'transfer' && !formCategories.some((category) => String(category.id) === formCategoryId)) {
-      const first = formCategories[0]
-      setFormCategoryId(first ? String(first.id) : '')
-      setFormCategory(first?.name || '')
-    }
-  }, [formAccounts, formCategories, transferRecipientAccounts, formScope, formKind, formAccountId, formDestinationId, formCategoryId])
-
-  useEffect(() => {
-    if (activeFamilyId && authUser?.families.some((family) => family.id === activeFamilyId)) return
-    setActiveFamilyId(authUser?.families[0]?.id ?? null)
-  }, [authUser, activeFamilyId])
+  const formAccountId = formAccounts.some((account) => String(account.id) === formAccountIdChoice) ? formAccountIdChoice : String(formAccounts[0]?.id ?? '')
+  const formAccount = formAccounts.find((account) => String(account.id) === formAccountId)?.name || ''
+  const formCategoryId = String((formCategories.find((category) => category.name === formCategoryChoice) || formCategories.find((category) => String(category.id) === formCategoryIdChoice) || formCategories[0])?.id ?? '')
+  const formCategory = formCategories.find((category) => String(category.id) === formCategoryId)?.name || formCategoryChoice
+  const transferDestinations = formScope === 'family' ? [...formAccounts, ...transferRecipientAccounts.map((account) => ({ ...account, ownerType: 'user' as const, ownerUserId: null, familyId: null, name: `${account.ownerName} · ${account.accountType === 'cash' ? 'เงินสด' : account.accountType === 'bank' ? 'บัญชีธนาคาร' : 'บัญชีอื่น'}`, balance: 0, openingBalance: 0, openingDate: '' }))] : formAccounts
+  const formDestinationId = transferDestinations.some((account) => String(account.id) === formDestinationIdChoice && String(account.id) !== formAccountId) ? formDestinationIdChoice : String(transferDestinations.find((account) => String(account.id) !== formAccountId)?.id ?? '')
+  const formDestination = transferDestinations.find((account) => String(account.id) === formDestinationId)?.name || ''
+  const transactionFilterKey = JSON.stringify([scope, activeFamilyId, page, dateFrom, dateTo, search, kindFilter])
+  const transactionPage = transactionPageSelection.filterKey === transactionFilterKey ? transactionPageSelection.page : 1
+  const setTransactionPage = (nextPage: number) => setTransactionPageSelection({ filterKey: transactionFilterKey, page: nextPage })
+  const transactionQueryKey = JSON.stringify([authUser?.id, scope, activeFamilyId, page, transactionPage, dateFrom, dateTo, search, kindFilter, financeVersion])
+  const transactionsLoading = Boolean(authUser && ['รายการทั้งหมด', 'ถังขยะ'].includes(page) && transactionsLoadedKey !== transactionQueryKey)
+  const reportQueryKey = JSON.stringify([authUser?.id, page, scope, activeFamilyId, dateFrom, dateTo, kindFilter, search, financeVersion])
+  const reportSummary = reportSummaryEntry?.key === reportQueryKey ? reportSummaryEntry.summary : null
+  const reportLoading = Boolean(authUser && ['ภาพรวม', 'รายงาน'].includes(page) && reportCompletedKey !== reportQueryKey)
 
   useEffect(() => {
     let active = true
-    if (!authUser) { setTransactions([]); setTransactionsLoading(false); setApiStatus('offline'); return () => { active = false } }
+    if (!authUser) return () => { active = false }
     const paginated = page === 'รายการทั้งหมด' || page === 'ถังขยะ' || page === 'ภาพรวม'
     const query = new URLSearchParams()
     if (paginated) {
@@ -286,9 +288,8 @@ function App() {
       if (search.trim()) query.set('search', search.trim())
       const kind = kindFilter === 'รายรับ' ? 'income' : kindFilter === 'รายจ่าย' ? 'expense' : kindFilter === 'โอน' ? 'transfer' : ''
       if (kind) query.set('kind', kind)
-    } else { setTransactions([]); setTransactionsLoading(false); setTransactionPageInfo({ page: 1, pageSize: 30, total: 0, totalPages: 0 }); setApiStatus('connected'); return () => { active = false } }
+    } else return () => { active = false }
     const queryText = query.toString()
-    setTransactionsLoading(true)
     apiFetch(paginated ? `/api/transactions/page?${queryText}` : `/api/transactions${queryText ? `?${queryText}` : ''}`)
       .then(async (response) => {
         if (!response.ok) throw new Error('โหลดรายการไม่สำเร็จ')
@@ -299,32 +300,28 @@ function App() {
         setApiStatus('connected')
       } })
       .catch(() => { if (active) setApiStatus('offline') })
-      .finally(() => { if (active) setTransactionsLoading(false) })
+      .finally(() => { if (active) setTransactionsLoadedKey(transactionQueryKey) })
     return () => { active = false }
-  }, [authUser, scope, activeFamilyId, page, transactionPage, dateFrom, dateTo, search, kindFilter, financeVersion])
-
-  useEffect(() => { setTransactionPage(1) }, [scope, activeFamilyId, page, dateFrom, dateTo, search, kindFilter])
+  }, [authUser, scope, activeFamilyId, page, transactionPage, dateFrom, dateTo, search, kindFilter, financeVersion, transactionQueryKey])
 
   useEffect(() => {
     let active = true
-    if (!authUser || !['ภาพรวม', 'รายงาน'].includes(page)) { setReportSummary(null); setReportLoading(false); return () => { active = false } }
+    if (!authUser || !['ภาพรวม', 'รายงาน'].includes(page)) return () => { active = false }
     const query = new URLSearchParams({ scope, dateFrom, dateTo })
     if (scope === 'family' && activeFamilyId) query.set('familyId', String(activeFamilyId))
     const kind = kindFilter === 'รายรับ' ? 'income' : kindFilter === 'รายจ่าย' ? 'expense' : kindFilter === 'โอน' ? 'transfer' : ''
     if (kind) query.set('kind', kind)
     if (search.trim()) query.set('search', search.trim())
-    setReportSummary(null)
-    setReportLoading(true)
     apiFetch(`/api/transactions/summary?${query}`)
       .then(async (response) => {
         if (!response.ok) throw new Error('โหลดสรุปรายการไม่สำเร็จ')
         return response.json() as Promise<ReportSummary>
       })
-      .then((summary) => { if (active) { setReportSummary(summary); setApiStatus('connected') } })
-      .catch(() => { if (active) { setReportSummary(null); setApiStatus('offline') } })
-      .finally(() => { if (active) setReportLoading(false) })
+      .then((summary) => { if (active) { setReportSummaryEntry({ key: reportQueryKey, summary }); setApiStatus('connected') } })
+      .catch(() => { if (active) setApiStatus('offline') })
+      .finally(() => { if (active) setReportCompletedKey(reportQueryKey) })
     return () => { active = false }
-  }, [authUser, scope, activeFamilyId, page, dateFrom, dateTo, kindFilter, search, financeVersion])
+  }, [authUser, scope, activeFamilyId, page, dateFrom, dateTo, kindFilter, search, financeVersion, reportQueryKey])
 
   const rangeRows = useMemo(() => transactions.filter((item) => {
     const date = item.occurredAt.slice(0, 10)
@@ -394,22 +391,20 @@ function App() {
     manuallyEditedReceiptFields.current = { title: false, amount: false, date: false, category: false }
     setEditingTransactionId(null)
     setClientRequestId(crypto.randomUUID())
-    setFormKind(kind); setFormScope(scope === 'family' && authUser?.families.length ? 'family' : 'personal'); setFormCategory(kind === 'income' ? 'เงินเดือน' : 'อาหาร')
-    setFormAmount(''); setFormTitle(''); setFormDate(bangkokToday()); setFormAccountId(''); setFormDestinationId(''); setFilePreview(''); setSelectedReceipt(null); setReceiptId(null); setReceiptSuggestion(null); setFormOwner(authUser?.displayName || ''); setFormPayer(authUser?.displayName || ''); setModal(true)
+    setFormKind(kind); setFormScope(scope === 'family' && authUser?.families.length ? 'family' : 'personal'); setFormCategoryChoice(kind === 'income' ? 'เงินเดือน' : 'อาหาร')
+    setFormAmount(''); setFormTitle(''); setFormDate(bangkokToday()); setFormAccountIdChoice(''); setFormDestinationIdChoice(''); setFilePreview(''); setSelectedReceipt(null); setReceiptId(null); setReceiptSuggestion(null); setFormOwner(authUser?.displayName || ''); setFormPayer(authUser?.displayName || ''); setModal(true)
   }
 
   function editTransaction(item: Transaction) {
     receiptUploadSequence.current += 1
     manuallyEditedReceiptFields.current = { title: true, amount: true, date: true, category: true }
     setEditingTransactionId(item.id)
-    setFormKind(item.kind); setFormScope(item.scope); setFormCategory(item.category)
+    setFormKind(item.kind); setFormScope(item.scope); setFormCategoryChoice(item.category)
     setFormAmount(String(item.amount)); setFormTitle(item.title)
     setFormDate(item.occurredAt.slice(0, 10))
-    setFormCategoryId(item.categoryId ? String(item.categoryId) : '')
-    const [account, destination] = item.account.split(' → ')
-    setFormAccount(account); if (destination) setFormDestination(destination)
-    setFormAccountId(String(item.kind === 'income' ? item.destinationAccountId || '' : item.sourceAccountId || ''))
-    setFormDestinationId(String(item.destinationAccountId || ''))
+    setFormCategoryIdChoice(item.categoryId ? String(item.categoryId) : '')
+    setFormAccountIdChoice(String(item.kind === 'income' ? item.destinationAccountId || '' : item.sourceAccountId || ''))
+    setFormDestinationIdChoice(String(item.destinationAccountId || ''))
     setFormOwner(item.owner); setFormPayer(item.payer || item.recorder); setFilePreview(''); setModal(true)
   }
 
@@ -428,7 +423,7 @@ function App() {
     const hadReceipt = Boolean(receiptId || selectedReceipt || filePreview)
     if (filePreview) URL.revokeObjectURL(filePreview)
     setReceiptId(null); setSelectedReceipt(null); setFilePreview(''); setReceiptSuggestion(null)
-    setFormScope(nextScope); setFormAccountId(''); setFormDestinationId(''); setFormOwner(authUser.displayName); setFormPayer(authUser.displayName)
+    setFormScope(nextScope); setFormAccountIdChoice(''); setFormDestinationIdChoice(''); setFormOwner(authUser.displayName); setFormPayer(authUser.displayName)
     if (hadReceipt) notify('ขอบเขตเปลี่ยนแล้ว กรุณาเลือกภาพใหม่เพื่อให้สิทธิ์ภาพตรงกับรายการ')
   }
 
@@ -459,7 +454,7 @@ function App() {
         if (result.extracted?.date && !manuallyEditedReceiptFields.current.date) setFormDate(result.extracted.date)
         if (result.extracted?.category && !manuallyEditedReceiptFields.current.category) {
           const category = formCategories.find((item) => item.name === result.extracted?.category)
-          if (category) { setFormCategory(category.name); setFormCategoryId(String(category.id)) }
+          if (category) { setFormCategoryChoice(category.name); setFormCategoryIdChoice(String(category.id)) }
         }
         if (!result.ocrAvailable) notify('บันทึกภาพแล้ว แต่บริการ OCR ยังไม่พร้อม กรุณากรอกข้อมูลตรวจสอบเอง')
         else if (!result.extracted?.rawText) notify('สแกนภาพแล้วแต่ยังอ่านข้อมูลไม่ได้ กรุณากรอกข้อมูลเอง')
@@ -761,10 +756,29 @@ function App() {
     setDateTo(today); setRange('6 เดือน')
   }
 
+  function clearSessionData() {
+    setFamilyInfo([])
+    setMoneyAccounts([])
+    setCategoryItems([])
+    setTransferRecipientAccounts([])
+    setBudgets([])
+    setBudgetMovements([])
+    setRecurringRules([])
+    setRecurringReviews([])
+    setTransactions([])
+    setReportSummaryEntry(null)
+    setHistoryEntries(null)
+    setSplitTransaction(null)
+    setSplitRows([])
+    activeFamilyIdRef.current = null
+    setActiveFamilyId(null)
+  }
+
   async function signOut() {
     await apiFetch('/api/auth/logout', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })
+    authUserRef.current = null
+    clearSessionData()
     setAuthUser(null)
-    setTransactions([])
   }
 
   async function deleteAccount(password: string, confirmation: string): Promise<string | null> {
@@ -772,17 +786,10 @@ function App() {
     const result = await response.json() as { message?: string; error?: string }
     if (!response.ok) return result.error || 'ลบบัญชีไม่สำเร็จ'
     setAuthMessage(result.message || 'ลบบัญชีแล้ว')
+    authUserRef.current = null
+    clearSessionData()
     setAuthUser(null)
-    setTransactions([])
     return null
-  }
-
-  function setSignedInUser(user: AuthUser) {
-    const alreadyHadFamilyAccess = Boolean(authUser?.families.length)
-    setAuthUser(user)
-    if (!user.families.length) setScope('personal')
-    else if (!alreadyHadFamilyAccess) setScope('family')
-    if (!user.families.some((family) => family.id === activeFamilyId)) setActiveFamilyId(user.families[0]?.id ?? null)
   }
 
   async function refreshFamilies() {
@@ -875,7 +882,7 @@ function App() {
           </div>
 
           {page !== 'ตั้งค่า' && <div className="toolbar">
-            <div className="scope-switch" role="tablist" aria-label="ขอบเขตข้อมูล"><button className={scope === 'family' ? 'selected' : ''} onClick={() => setScope('family')} disabled={!authUser.families.length}><Users size={15} /> ครอบครัว</button><button className={scope === 'personal' ? 'selected' : ''} onClick={() => setScope('personal')}><Wallet size={15} /> ส่วนตัว</button>{scope === 'family' && authUser.families.length > 1 && <select aria-label="เลือกครอบครัว" value={activeFamilyId ?? ''} onChange={(event) => setActiveFamilyId(Number(event.target.value))}>{authUser.families.map((family) => <option key={family.id} value={family.id}>{family.name}</option>)}</select>}</div>
+            <div className="scope-switch" role="tablist" aria-label="ขอบเขตข้อมูล"><button className={scope === 'family' ? 'selected' : ''} onClick={() => setScope('family')} disabled={!authUser.families.length}><Users size={15} /> ครอบครัว</button><button className={scope === 'personal' ? 'selected' : ''} onClick={() => setScope('personal')}><Wallet size={15} /> ส่วนตัว</button>{scope === 'family' && authUser.families.length > 1 && <select aria-label="เลือกครอบครัว" value={activeFamilyId ?? ''} onChange={(event) => { const nextFamilyId = Number(event.target.value); activeFamilyIdRef.current = nextFamilyId; setTransferRecipientAccounts([]); setActiveFamilyId(nextFamilyId) }}>{authUser.families.map((family) => <option key={family.id} value={family.id}>{family.name}</option>)}</select>}</div>
             <div className="toolbar-right"><button className="date-picker" onClick={selectCurrentMonth}><CalendarDays size={16} />{monthText}<ChevronDown size={14} /></button><div className="period-tabs"><button onClick={selectCurrentMonth} className={range === 'เดือนนี้' ? 'period-active' : ''}>เดือนนี้</button><button onClick={() => setRange('กำหนดเอง')} className={range === 'กำหนดเอง' ? 'period-active' : ''}>กำหนดเอง</button></div>{range === 'กำหนดเอง' && <div className="date-range-fields"><input aria-label="ตั้งแต่วันที่" type="date" value={dateFrom} onChange={(event) => setDateFrom(event.target.value)}/><span>ถึง</span><input aria-label="ถึงวันที่" type="date" value={dateTo} onChange={(event) => setDateTo(event.target.value)}/></div>}</div>
           </div>}
 
@@ -909,12 +916,12 @@ function App() {
 
       <button className="mobile-add" onClick={() => openComposer('expense')}><Plus size={22}/></button>
 
-      {modal && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) void closeComposer() }}><div className="composer-modal" role="dialog" aria-modal="true" aria-labelledby="composer-title"><div className="modal-heading"><div><div className="modal-kicker">{editingTransactionId ? 'แก้ไขรายการ' : 'เพิ่มรายการใหม่'}</div><h2 id="composer-title">{editingTransactionId ? 'ปรับข้อมูลการเงิน' : 'บันทึกการเงิน'}</h2></div><button className="icon-button" onClick={() => void closeComposer()} aria-label="ปิด"><X size={19}/></button></div><div className="kind-tabs">{([{key:'expense',label:'รายจ่าย',icon:<ArrowUpRight size={15}/>},{key:'income',label:'รายรับ',icon:<ArrowDownRight size={15}/>},{key:'transfer',label:'โอนเงิน',icon:<ArrowLeftRight size={15}/>} ] as const).map((item) => <button key={item.key} type="button" className={formKind === item.key ? `${item.key} active` : ''} onClick={() => { setFormKind(item.key); setFormCategory(item.key === 'income' ? 'เงินเดือน' : 'อาหาร') }}>{item.icon}{item.label}</button>)}</div><form onSubmit={saveTransaction}>
+      {modal && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) void closeComposer() }}><div className="composer-modal" role="dialog" aria-modal="true" aria-labelledby="composer-title"><div className="modal-heading"><div><div className="modal-kicker">{editingTransactionId ? 'แก้ไขรายการ' : 'เพิ่มรายการใหม่'}</div><h2 id="composer-title">{editingTransactionId ? 'ปรับข้อมูลการเงิน' : 'บันทึกการเงิน'}</h2></div><button className="icon-button" onClick={() => void closeComposer()} aria-label="ปิด"><X size={19}/></button></div><div className="kind-tabs">{([{key:'expense',label:'รายจ่าย',icon:<ArrowUpRight size={15}/>},{key:'income',label:'รายรับ',icon:<ArrowDownRight size={15}/>},{key:'transfer',label:'โอนเงิน',icon:<ArrowLeftRight size={15}/>} ] as const).map((item) => <button key={item.key} type="button" className={formKind === item.key ? `${item.key} active` : ''} onClick={() => { setFormKind(item.key); setFormCategoryChoice(item.key === 'income' ? 'เงินเดือน' : 'อาหาร') }}>{item.icon}{item.label}</button>)}</div><form onSubmit={saveTransaction}>
         <div className="amount-field"><label htmlFor="amount">จำนวนเงิน</label><div><span>฿</span><input id="amount" inputMode="decimal" value={formAmount} onChange={(event) => { manuallyEditedReceiptFields.current.amount = true; setFormAmount(event.target.value) }} placeholder="0.00" required /></div></div>
         <div className="form-grid"><label className="input-label">วันที่รายการ<input type="date" value={formDate} onChange={(event) => { manuallyEditedReceiptFields.current.date = true; setFormDate(event.target.value) }} required/></label></div>
         <div className="form-row"><label>ขอบเขต</label><div className="scope-options"><button type="button" disabled={!authUser.families.length} className={formScope === 'family' ? 'chosen' : ''} onClick={() => changeFormScope('family')}><Users size={15}/> ครอบครัว</button><button type="button" className={formScope === 'personal' ? 'chosen' : ''} onClick={() => changeFormScope('personal')}><Wallet size={15}/> ส่วนตัว</button></div></div>
-        <div className={`form-grid ${formKind === 'transfer' ? 'single' : ''}`}><label className="input-label">{formKind === 'income' ? 'ที่มาของรายรับ' : formKind === 'transfer' ? 'รายละเอียดการโอน' : 'ชื่อรายการ'}<input value={formTitle} onChange={(event) => { manuallyEditedReceiptFields.current.title = true; setFormTitle(event.target.value) }} placeholder={formKind === 'income' ? 'เช่น เงินเดือน' : formKind === 'transfer' ? 'เช่น โอนให้แม่' : 'เช่น ซื้อของเข้าบ้าน'} /></label>{formKind !== 'transfer' && <label className="input-label">หมวดหมู่<select value={formCategoryId} onChange={(event) => { manuallyEditedReceiptFields.current.category = true; setFormCategoryId(event.target.value); setFormCategory(formCategories.find((category) => String(category.id) === event.target.value)?.name || '') }} required><option value="">เลือกหมวดหมู่</option>{formCategories.map((category) => <option key={category.id} value={category.id}>{category.icon} {category.name}</option>)}</select></label>}</div>
-        {formKind === 'transfer' ? <div className="form-grid"><label className="input-label">บัญชีต้นทาง<select value={formAccountId} onChange={(event) => { const account = formAccounts.find((item) => String(item.id) === event.target.value); setFormAccountId(event.target.value); setFormAccount(account?.name || '') }} required><option value="">เลือกบัญชีต้นทาง</option>{formAccounts.map((account) => <option key={account.id} value={account.id}>{account.name} · {account.ownerType === 'family' ? 'ครอบครัว' : 'ส่วนตัว'}</option>)}</select></label><label className="input-label">บัญชีปลายทาง<select value={formDestinationId} onChange={(event) => { const account = formAccounts.find((item) => String(item.id) === event.target.value); const recipient = transferRecipientAccounts.find((item) => String(item.id) === event.target.value); setFormDestinationId(event.target.value); setFormDestination(account?.name || (recipient ? `${recipient.ownerName} · ${recipient.accountType === 'cash' ? 'เงินสด' : recipient.accountType === 'bank' ? 'บัญชีธนาคาร' : 'บัญชีอื่น'}` : '')) }} required><option value="">เลือกบัญชีปลายทาง</option>{formAccounts.filter((account) => String(account.id) !== formAccountId).map((account) => <option key={account.id} value={account.id}>{account.name} · {account.ownerType === 'family' ? 'ครอบครัว' : 'ส่วนตัว'}</option>)}{formScope === 'family' && transferRecipientAccounts.map((account) => <option key={account.id} value={account.id}>{account.ownerName} · {account.accountType === 'cash' ? 'เงินสด' : account.accountType === 'bank' ? 'บัญชีธนาคาร' : 'บัญชีอื่น'}</option>)}</select></label></div> : <><div className="form-grid"><label className="input-label">{formKind === 'income' ? 'บัญชีรับเงิน' : 'บัญชีจ่ายเงิน'}<select value={formAccountId} onChange={(event) => { const account = formAccounts.find((item) => String(item.id) === event.target.value); setFormAccountId(event.target.value); setFormAccount(account?.name || '') }} required><option value="">เลือกบัญชีเงิน</option>{formAccounts.map((account) => <option key={account.id} value={account.id}>{account.name} · {account.ownerType === 'family' ? 'ครอบครัว' : 'ส่วนตัว'}</option>)}</select></label>{formKind === 'expense' && <label className="input-label">ผู้จ่าย<select value={formPayer} onChange={(event) => setFormPayer(event.target.value)}><option>{authUser.displayName}</option>{formScope === 'family' && <><option>ครอบครัว</option>{familyInfo.find((family) => family.id === activeFamilyId)?.members.filter((member) => member.displayName !== authUser.displayName).map((member) => <option key={member.id}>{member.displayName}</option>)}</>}</select></label>}</div><div className="form-grid"><label className="input-label">เจ้าของรายการ<select value={formOwner} onChange={(event) => setFormOwner(event.target.value)}><option>{authUser.displayName}</option>{formScope === 'family' && <><option>ครอบครัว</option>{familyInfo.find((family) => family.id === activeFamilyId)?.members.filter((member) => member.displayName !== authUser.displayName).map((member) => <option key={member.id}>{member.displayName}</option>)}</>}</select></label></div></>}
+        <div className={`form-grid ${formKind === 'transfer' ? 'single' : ''}`}><label className="input-label">{formKind === 'income' ? 'ที่มาของรายรับ' : formKind === 'transfer' ? 'รายละเอียดการโอน' : 'ชื่อรายการ'}<input value={formTitle} onChange={(event) => { manuallyEditedReceiptFields.current.title = true; setFormTitle(event.target.value) }} placeholder={formKind === 'income' ? 'เช่น เงินเดือน' : formKind === 'transfer' ? 'เช่น โอนให้แม่' : 'เช่น ซื้อของเข้าบ้าน'} /></label>{formKind !== 'transfer' && <label className="input-label">หมวดหมู่<select value={formCategoryId} onChange={(event) => { manuallyEditedReceiptFields.current.category = true; setFormCategoryIdChoice(event.target.value); setFormCategoryChoice(formCategories.find((category) => String(category.id) === event.target.value)?.name || '') }} required><option value="">เลือกหมวดหมู่</option>{formCategories.map((category) => <option key={category.id} value={category.id}>{category.icon} {category.name}</option>)}</select></label>}</div>
+        {formKind === 'transfer' ? <div className="form-grid"><label className="input-label">บัญชีต้นทาง<select value={formAccountId} onChange={(event) => { setFormAccountIdChoice(event.target.value) }} required><option value="">เลือกบัญชีต้นทาง</option>{formAccounts.map((account) => <option key={account.id} value={account.id}>{account.name} · {account.ownerType === 'family' ? 'ครอบครัว' : 'ส่วนตัว'}</option>)}</select></label><label className="input-label">บัญชีปลายทาง<select value={formDestinationId} onChange={(event) => setFormDestinationIdChoice(event.target.value)} required><option value="">เลือกบัญชีปลายทาง</option>{formAccounts.filter((account) => String(account.id) !== formAccountId).map((account) => <option key={account.id} value={account.id}>{account.name} · {account.ownerType === 'family' ? 'ครอบครัว' : 'ส่วนตัว'}</option>)}{formScope === 'family' && transferRecipientAccounts.map((account) => <option key={account.id} value={account.id}>{account.ownerName} · {account.accountType === 'cash' ? 'เงินสด' : account.accountType === 'bank' ? 'บัญชีธนาคาร' : 'บัญชีอื่น'}</option>)}</select></label></div> : <><div className="form-grid"><label className="input-label">{formKind === 'income' ? 'บัญชีรับเงิน' : 'บัญชีจ่ายเงิน'}<select value={formAccountId} onChange={(event) => { setFormAccountIdChoice(event.target.value) }} required><option value="">เลือกบัญชีเงิน</option>{formAccounts.map((account) => <option key={account.id} value={account.id}>{account.name} · {account.ownerType === 'family' ? 'ครอบครัว' : 'ส่วนตัว'}</option>)}</select></label>{formKind === 'expense' && <label className="input-label">ผู้จ่าย<select value={formPayer} onChange={(event) => setFormPayer(event.target.value)}><option>{authUser.displayName}</option>{formScope === 'family' && <><option>ครอบครัว</option>{familyInfo.find((family) => family.id === activeFamilyId)?.members.filter((member) => member.displayName !== authUser.displayName).map((member) => <option key={member.id}>{member.displayName}</option>)}</>}</select></label>}</div><div className="form-grid"><label className="input-label">เจ้าของรายการ<select value={formOwner} onChange={(event) => setFormOwner(event.target.value)}><option>{authUser.displayName}</option>{formScope === 'family' && <><option>ครอบครัว</option>{familyInfo.find((family) => family.id === activeFamilyId)?.members.filter((member) => member.displayName !== authUser.displayName).map((member) => <option key={member.id}>{member.displayName}</option>)}</>}</select></label></div></>}
         {formKind === 'expense' && <div className="receipt-box">{filePreview ? <div className="receipt-preview"><img src={filePreview} alt="ภาพสลิปที่เลือก"/><div><strong><Sparkles size={14}/> {receiptId ? (receiptOcrAvailable ? 'ผลสแกนจากภาพ · โปรดตรวจสอบ' : 'บันทึกภาพแล้ว · กรอกข้อมูลเอง') : 'กำลังอัปโหลดและสแกนภาพ…'}</strong><span>{receiptSuggestion?.merchant || selectedReceipt?.name || 'ไม่พบชื่อร้าน'}{receiptSuggestion?.amount ? ` · ฿${formatMoney(receiptSuggestion.amount)}` : ''}{receiptSuggestion?.date ? ` · ${receiptSuggestion.date}` : ''}</span>{receiptSuggestion?.category && <small>หมวดที่แนะนำ: {receiptSuggestion.category}</small>}{receiptSuggestion?.rawText && <details><summary>อ่านข้อความจากสลิป</summary><pre>{receiptSuggestion.rawText}</pre></details>}<button type="button" onClick={() => fileInput.current?.click()}>เลือกภาพอื่น</button></div></div> : <button type="button" className="receipt-select" onClick={() => fileInput.current?.click()}><span className="receipt-icon"><FileImage size={19}/></span><span><strong>แนบสลิปหรือใบเสร็จ</strong><small>เลือกภาพจากคลังหรือถ่ายภาพ · สูงสุด 6 MB</small></span><Upload size={16}/></button>}<input ref={fileInput} type="file" accept="image/jpeg,image/png,image/webp" capture="environment" hidden onChange={handleImage}/></div>}
         <div className="modal-footer"><span><CircleHelp size={14}/> ผู้บันทึก: {authUser.displayName}</span><button type="button" className="secondary-button" onClick={() => void closeComposer()}>ยกเลิก</button><button type="submit" className="primary-button" disabled={Boolean(selectedReceipt && !receiptId)}><Check size={16}/>{editingTransactionId ? 'บันทึกการแก้ไข' : 'บันทึกรายการ'}</button></div>
         </form></div></div>}

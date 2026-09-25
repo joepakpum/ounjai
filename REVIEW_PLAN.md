@@ -1,48 +1,39 @@
 # Ounjai review and remediation plan
 
-Review started: 25 September 2026
+Review date: 25 September 2026
+Baseline: `1dae08b`
+Working branch: `codex/ounjai-review-plan`
 
-Baseline: commit `1dae08b` in an isolated worktree.
-Scope: application code, authorization and data handling, MySQL migrations, Podman Compose, backup/restore instructions, and available frontend checks. This is a source/configuration review; it does not certify public-domain readiness.
+## Scope
 
-## Summary
+Reviewed authentication, authorization, family and personal finance data, MySQL migrations, receipt handling, Podman Compose, backup/restore, frontend quality, and operational readiness. All integration checks use disposable MySQL/API containers and synthetic data. No production data was modified and Cloudflare Tunnel was not started.
 
-The repository contains the expected private-by-default deployment shape: the web and MySQL ports bind to loopback, the API is internal to Compose, and Cloudflare Tunnel is an opt-in profile. The account deletion policy and family-history behavior are documented and implemented. The production API was previously reported healthy on MySQL, but that runtime was not changed or used for this review.
+## Findings and disposition
 
-No confirmed exploitable application-code defect was established in the checks below. The findings are operational or verification gaps that must be resolved before claiming complete production readiness. The Cloudflare Tunnel remains off.
+| Priority | Finding | Work completed | Disposition |
+| --- | --- | --- | --- |
+| P1 | Tunnel startup relied on operator discipline and insecure Compose defaults. | Added a fail-closed Compose preflight and PowerShell validate/start/stop wrapper. Gate checks HTTPS domain format, secure cookies, distinct strong DB passwords, token, SMTP transport/credentials, and Super Admin email. Added unit tests and isolated Compose smoke test. | Code gate is complete. Real domain/DNS, production secrets, operator acceptance, and the final go-live decision remain external prerequisites. Tunnel remains off. |
+| P1 | Backup encryption, offsite target, key ownership, schedule, and retention are undecided. | Existing backup/restore remains documented and has been exercised with disposable data. | User explicitly deferred these design choices. Automated/offsite disaster recovery is not complete; revisit when the user chooses a policy. |
+| P2 | Real receipt OCR accuracy was not independently verified. | Existing synthetic image workflow and confirmation step remain in place. | User plans to test with their own slip in the app. Do not ask for or retain a slip here. Real-image accuracy is awaiting the user's result. |
+| P2 | Frontend lint reported React effect warnings. | Refactored auth/data/form selection state to avoid effect-driven resets and corrected dependencies. | `npm run lint` passes with zero warnings; production build is included in verification. |
+| P2 | Route and ledger scenarios lacked one repeatable, isolated verification command. | Added `compose.integration.yaml`, a disposable MySQL/API integration suite, and `scripts/integration.ps1`; suite checks auth/scope, family ledger balances, transfers, permission denial, and account deletion/anonymization behavior. | Integration suite passed; its uniquely named containers, network, and volumes were removed. |
+| P2 | Real-device account-deletion acceptance and inbox delivery are not proven by synthetic checks. | Account deletion is covered at API/database level, and SMTP sink coverage is documented in `PLAN.md`. | User-facing, real-account deletion acceptance and confirmation that Gmail delivered mail to the inbox remain outstanding. |
 
-## Findings and work plan
+## Verification command
 
-| Priority | Finding and evidence | Impact | Remediation | Verification / dependency | Status |
-| --- | --- | --- | --- | --- | --- |
-| P1 | Public-deployment settings rely on operator discipline: [`compose.yaml`](compose.yaml) defaults `MYSQL_PASSWORD` and `MYSQL_ROOT_PASSWORD`, `APP_BASE_URL` to localhost, and `COOKIE_SECURE` to false; the `cloudflared` profile is enabled by profile plus token. [`README.md`](README.md) lists required overrides but there is no preflight that rejects unsafe tunnel configuration. | A tunnel started with incomplete `.env` can expose a service with insecure defaults or incorrect cookie behavior. Local port bindings reduce exposure in the default profile, but are not a deployment guard. | Add a deployment preflight that refuses tunnel startup unless HTTPS `APP_BASE_URL`, secure cookies, non-default DB credentials, and a non-empty token are set. Keep credentials in untracked `.env`; do not enable the profile as part of this review. | Verify rejection for each missing/unsafe setting and acceptance for a disposable valid configuration. Requires an explicit domain and operator-supplied secrets before production acceptance. | Planned; tunnel stays off |
-| P1 | Backup output is not encrypted and is not scheduled/offsite: [`scripts/backup.ps1`](scripts/backup.ps1), [`OPERATIONS.md`](OPERATIONS.md). The user explicitly deferred destination, encryption key, schedule, and retention decisions. | Local backup files contain the entire database and receipt images, so access to the backup directory grants access to sensitive financial information. A host loss can also lose all copies. | Decide encrypted destination, key custody, schedule, and retention; then implement and test policy. Until then, limit filesystem access and do not claim automated disaster recovery. | Requires user decisions; test encryption, checksum, restore, retention, and failure recovery before marking complete. | Waiting for user decision |
-| P2 | Real receipt quality is unverified. OCR/backup checks documented in [`PLAN.md`](PLAN.md) and [`OPERATIONS.md`](OPERATIONS.md) used synthetic images; user said they can provide a slip but none is in this repository/task. | OCR may misread amounts or Thai dates on real receipts. The confirmation step is a key financial safety control. | Run OCR against a user-provided image with sensitive details redacted; record field-level accuracy and correct parsing issues. Never save a transaction without user confirmation. | Requires user-provided image; test amount/date/merchant/category suggestions and rejection/edit flows. | Waiting for image |
-| P2 | Frontend lint reports 13 `react(set-state-in-effect)` warnings and one missing `setSignedInUser` dependency warning in [`web/src/App.tsx`](web/src/App.tsx:139). | Effects that immediately set state can cause extra renders; an incomplete dependency list can leave auth UI stale after callback identity changes. This is a maintainability/behavior risk, not proof of a current user-visible defect. | Review each affected effect; derive state during render where possible, move state changes to event/data-load callbacks, and correct dependencies without changing auth behavior. | `npm run lint` with zero warnings for touched code, production build, and UI checks for login, family selection, receipt upload, and transaction reload. | Planned |
-| P2 | No real-device acceptance of multi-user account deletion and family transfer is recorded; previous coverage is synthetic MySQL/API fixture testing. | Edge cases around family ownership, attribution, receipts, and audit history may differ from a household's actual data. | Review flow with a disposable family and synthetic transactions/receipts; confirm the user-facing copy and export/deletion behavior. Do not run deletion on production accounts. | Disposable account and MySQL fixture only; user review of final copy before domain access. | Planned |
-| P2 | Route/permission and ledger integration coverage is documented in [`PLAN.md`](PLAN.md), but this checkout does not contain a repeatable consolidated command for those scenario suites. | Future changes can regress financial totals or scope checks without a quick, repeatable signal. | Consolidate existing disposable-MySQL checks into documented scripts/commands, then add transaction, transfer, family-role, account-deletion, and migration-upgrade cases to the routine verification workflow. | Keep all fixtures isolated; confirm cleanup and never point scenario checks at production. | Planned |
+Run the consolidated checks from the repository root:
 
-## Review sequence
+```powershell
+./scripts/verify.ps1
+```
 
-1. Close the P1 deployment gate in code and docs, without turning on Tunnel.
-2. Make the frontend lint warnings actionable, preserving current flows.
-3. Consolidate disposable-MySQL verification and run it against isolated fixtures.
-4. Complete receipt OCR and account-deletion acceptance when user inputs are available.
-5. Resolve backup design with the user, implement it, and rehearse restore.
-6. Re-run API syntax checks, frontend lint/build, Podman build/health checks, and confirm the Tunnel service is stopped.
+It checks API syntax, tunnel-preflight unit and Compose behavior, the disposable MySQL integration suite, frontend lint/build, and Compose configuration. Integration data and named volumes are removed by the script. Do not run production migrations or point this suite at production.
 
-## Checks completed for this review
+## Remaining actions
 
-- Read `AGENT.md`, `PLAN.md`, `README.md`, `OPERATIONS.md`, `compose.yaml`, API route/authentication code, migrations, and backup/restore script.
-- Confirmed Compose defaults bind MySQL and web to `127.0.0.1`, API is not host-published, and Cloudflare is only under the `tunnel` profile.
-- Ran `npm run lint` in `web/`: it completed with 14 warnings (13 set-state-in-effect and one missing dependency); no errors were reported.
-- Ran `node --check api/server.js` and `npm run build` in `web/`: both passed.
-- Checked the current Podman container list; no `saving-cloudflared` container is running.
-- No production database or user records were changed. Cloudflare Tunnel was not started.
+1. User reviews real-slip OCR suggestions in the app and reports any amount/date/merchant/category errors.
+2. User confirms reset-password email reached the Gmail inbox (including spam folder).
+3. Decide backup encryption, key custody, offsite destination, schedule, and retention before claiming complete disaster recovery.
+4. Before any public launch, set real production values in the ignored `.env`, validate against the real HTTPS domain, review the data/access policy, and get explicit operator approval. Cloudflare Tunnel stays off until then.
 
-## User decisions / external inputs still needed
-
-- Backup destination, encryption/key custody, schedule, and retention remain deferred by the user.
-- A redacted real receipt image is needed for OCR accuracy review.
-- Final domain, secret values, and operator acceptance are required for a deployment preflight success case; secrets must remain in `.env` and outside Git.
-- The reset-password SMTP request was accepted by the handler in a previous task; user confirmation of inbox/spam delivery is still outstanding.
+These items require user input or production-domain configuration; they are not silently treated as completed by code tests.

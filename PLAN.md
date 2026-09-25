@@ -317,3 +317,11 @@
 - ส่ง reset-password email จริง 1 ครั้งไปยัง joepakpum@gmail.com หลังได้รับอนุญาต; API ได้ HTTP 202 หลังรอผล SMTP sendMail และไม่เปิดเผย token; รอผู้ใช้ยืนยันกล่องจดหมาย/Spam
 - งานที่ยังต้องปิด: ตรวจ OCR เมื่อได้รับสลิปจริงที่ผู้ใช้เลือก; สำรองเข้ารหัส/นอกเครื่อง/อัตโนมัติพักตามผู้ใช้ขอ; ผู้ใช้ต้องทบทวนข้อมูลจริงและ security gate ก่อนเปิด domain
 - Cloudflare Tunnel ยังคงปิด
+
+## บันทึกตรวจสอบรอบรีวิว 25 กันยายน 2026
+
+- เพิ่ม `scripts/verify.ps1` เป็นคำสั่งตรวจรวม: API syntax, tunnel preflight unit/Compose smoke tests, disposable MySQL integration suite, frontend lint/build และ Compose config
+- Integration fixture ใช้ MySQL 8.4 และ API containers/volumes ชั่วคราว มี synthetic users และทดสอบ auth/scope, family income/expense/transfer, ยอดบัญชี, การปฏิเสธการแก้รายการของผู้อื่น และการลบบัญชีสมาชิกโดยคงรายการครอบครัวแบบ anonymized; ผ่านและลบ containers/network/volumes แล้ว
+- Refactor `web/src/App.tsx` ให้ lint ผ่านโดยไม่มี warning; ยืนยัน production build ผ่านในรอบ verification
+- Preflight ปฏิเสธ domain ตัวอย่าง/โดเมน reserved และ URL ที่ฝัง credentials เพิ่มเติม; ทดสอบด้วยค่าจำลองเท่านั้น ไม่มีการเปิด Tunnel
+- ผู้ใช้ขอพักการตัดสินใจเรื่องปลายทาง/การเข้ารหัส/กุญแจ/ตารางเวลา/retention ของ backup และจะทดสอบ OCR ด้วยสลิปของตนเองในแอป; สองหัวข้อนี้จึงยังไม่ถูกประกาศว่าปิดแล้ว

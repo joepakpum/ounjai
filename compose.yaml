@@ -77,6 +77,29 @@ services:
     ports:
       - "127.0.0.1:${WEB_PORT:-5173}:8080"
 
+  tunnel-preflight:
+    build:
+      context: ./scripts
+      dockerfile: Dockerfile.tunnel-preflight
+    image: localhost/saving-tunnel-preflight:latest
+    container_name: saving-tunnel-preflight
+    restart: "no"
+    profiles:
+      - tunnel
+    environment:
+      APP_BASE_URL: ${APP_BASE_URL:-}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-saving-local-app}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-saving-local-root}
+      CLOUDFLARE_TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:-}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_SECURE: ${SMTP_SECURE:-false}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM: ${SMTP_FROM:-}
+      SYSTEM_ADMIN_EMAIL: ${SYSTEM_ADMIN_EMAIL:-}
+
   cloudflared:
     image: docker.io/cloudflare/cloudflared:latest
     container_name: saving-cloudflared
@@ -87,7 +110,10 @@ services:
       TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:-}
     command: tunnel --no-autoupdate run
     depends_on:
-      - web
+      web:
+        condition: service_started
+      tunnel-preflight:
+        condition: service_completed_successfully
 
 volumes:
   saving_mysql_data:

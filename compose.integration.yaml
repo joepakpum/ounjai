@@ -1,0 +1,69 @@
+services:
+  mysql:
+    image: docker.io/library/mysql:8.4
+    environment:
+      MYSQL_DATABASE: saving_integration
+      MYSQL_USER: integration_app
+      MYSQL_PASSWORD: integration-app-password-only
+      MYSQL_ROOT_PASSWORD: integration-root-password-only
+      TZ: Asia/Bangkok
+    volumes:
+      - integration_mysql_data:/var/lib/mysql
+      - ./database/init/001-schema.sql:/docker-entrypoint-initdb.d/001-schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping --host=127.0.0.1 --user=root --password=\"$$MYSQL_ROOT_PASSWORD\" --silent"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+      start_period: 10s
+
+  api:
+    build:
+      context: ./api
+    environment:
+      PORT: 3000
+      MYSQL_HOST: mysql
+      MYSQL_PORT: 3306
+      MYSQL_DATABASE: saving_integration
+      MYSQL_USER: integration_app
+      MYSQL_PASSWORD: integration-app-password-only
+      APP_BASE_URL: http://localhost:5173
+      COOKIE_SECURE: "false"
+      SYSTEM_ADMIN_EMAIL: owner@integration.invalid
+      RECEIPT_STORAGE_PATH: /var/lib/saving/receipts
+      TZ: Asia/Bangkok
+    volumes:
+      - integration_receipt_data:/var/lib/saving/receipts
+    depends_on:
+      mysql:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+      start_period: 10s
+
+  api-tests:
+    build:
+      context: ./api
+    command: ["node", "--test", "/app/integration-tests/finance.integration.test.mjs"]
+    environment:
+      MYSQL_HOST: mysql
+      MYSQL_PORT: 3306
+      MYSQL_DATABASE: saving_integration
+      MYSQL_USER: integration_app
+      MYSQL_PASSWORD: integration-app-password-only
+      APP_BASE_URL: http://localhost:5173
+      API_BASE_URL: http://api:3000
+      TEST_PASSWORD: Integration-test-password-2026
+      TZ: Asia/Bangkok
+    volumes:
+      - ./scripts/integration:/app/integration-tests:ro
+    depends_on:
+      api:
+        condition: service_healthy
+
+volumes:
+  integration_mysql_data:
+  integration_receipt_data:

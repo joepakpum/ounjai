@@ -1,0 +1,4 @@
+FROM docker.io/library/node:22-alpine
+WORKDIR /check
+COPY tunnel-preflight.mjs ./tunnel-preflight.mjs
+CMD ["node", "tunnel-preflight.mjs"]

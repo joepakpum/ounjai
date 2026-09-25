@@ -329,3 +329,5 @@
 - เพิ่ม `.gitattributes` บังคับ LF ให้ shell/envsh scripts เพราะ checkout แบบ CRLF ทำให้ Nginx entrypoint script เริ่มไม่ได้ใน image ที่ build บน Windows; build/start web container ผ่าน
 - อัปเดตเฉพาะ `saving-web` หลังทดสอบ; `/api/health` ตอบ `ok` และ MySQL; ไม่ลบ volume และไม่ได้เปิด Tunnel
 - เพิ่มขั้นตอนหลังแก้โค้ด/ปิดงานใน `OPERATIONS.md` รวมกรณีแก้เว็บ/API/Compose และคำสั่งทดสอบ/ตรวจ health
+- ปรับ OCR สลิป: preprocess auto-orient/grayscale/upscale/deskew ด้วย ImageMagick แบบจำกัด resource; OCR สอง page segmentation modes แล้วเลือกผลที่มีฟิลด์ชัด; แยก transfer slip/receipt, จับยอดจาก label ที่ตรงประเภท, ผู้รับ, วันไทย/พ.ศ. และไม่เดาตัวเลขทั่วไปเป็นยอด; เปิดแนบภาพในรายการโอน; แสดงข้อมูลมีโครงสร้างก่อนและเก็บ raw OCR ไว้ในรายละเอียดพับได้
+- เพิ่ม parser unit tests ด้วยข้อความสังเคราะห์; ความแม่นยำกับสลิปธนาคารจริงยังรอผู้ใช้ทดลองตามที่แจ้งไว้

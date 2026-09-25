@@ -6,6 +6,9 @@ try {
   node --check api/server.js
   if ($LASTEXITCODE -ne 0) { throw 'API syntax check failed.' }
 
+  node --test api/receipt-ocr.test.js
+  if ($LASTEXITCODE -ne 0) { throw 'Receipt OCR parser tests failed.' }
+
   node --test scripts/tunnel-preflight.test.mjs
   if ($LASTEXITCODE -ne 0) { throw 'Tunnel preflight tests failed.' }
 

@@ -1,6 +1,6 @@
 import http from 'node:http'
 import { createHash, randomBytes } from 'node:crypto'
-import { mkdir, writeFile, readFile, unlink } from 'node:fs/promises'
+import { mkdir, writeFile, readFile, unlink, chmod } from 'node:fs/promises'
 import path from 'node:path'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
@@ -8,6 +8,7 @@ import argon2 from 'argon2'
 import nodemailer from 'nodemailer'
 import mysql from 'mysql2/promise'
 import { migrate } from './migrate.js'
+import { parseReceiptOcr, scoreReceiptOcr } from './receipt-ocr.js'
 
 const port = Number(process.env.PORT || 3000)
 const appBaseUrl = process.env.APP_BASE_URL || 'http://localhost:5173'
@@ -153,21 +154,6 @@ async function processRecurringReviews() {
     })
     await pool.query('INSERT IGNORE INTO recurring_reviews (recurring_rule_id, cycle_key, review_date, payload) VALUES ?', [values])
   }
-}
-
-function receiptSuggestions(text) {
-  const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
-  const totalLine = lines.find((line) => /ยอดสุทธิ|ยอดชำระ|รวมทั้งสิ้น|grand total|total/i.test(line))
-  const amountCandidates = (totalLine ? [totalLine] : lines).flatMap((line) => [...line.matchAll(/(?:฿|บาท)?\s*(\d{1,3}(?:,\d{3})*|\d+)\.(\d{2})/g)].map((match) => Number(`${match[1].replaceAll(',', '')}.${match[2]}`)))
-  const amount = amountCandidates.length ? amountCandidates[amountCandidates.length - 1] : null
-  const dateMatch = text.match(/\b(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})\b/)
-  let year = dateMatch ? Number(dateMatch[3]) : 0
-  if (year > 0 && year < 100) year += 2500
-  if (year > 2400) year -= 543
-  const date = dateMatch ? `${year}-${String(Number(dateMatch[2])).padStart(2, '0')}-${String(Number(dateMatch[1])).padStart(2, '0')}` : null
-  const combined = text.toLowerCase()
-  const category = /restaurant|อาหาร|cafe|กาแฟ|food|ข้าว/.test(combined) ? 'อาหาร' : /taxi|grab|เดินทาง|รถไฟ|fuel|น้ำมัน/.test(combined) ? 'เดินทาง' : /pharmacy|hospital|ยา|คลินิก|สุขภาพ/.test(combined) ? 'สุขภาพ' : null
-  return { merchant: lines[0]?.slice(0, 160) || null, amount, date, category, rawText: text.slice(0, 8000) }
 }
 
 function readCookie(request, name) {
@@ -1571,14 +1557,31 @@ async function handle(request, response) {
     const filePath = path.join(receiptDirectory, storageKey)
     await mkdir(receiptDirectory, { recursive: true })
     await writeFile(filePath, buffer, { flag: 'wx', mode: 0o600 })
-    let extracted = { merchant: null, amount: null, date: null, category: null, rawText: '' }
+    let extracted = { documentType: 'unknown', merchant: null, recipient: null, amount: null, date: null, category: null, rawText: '' }
     let status = 'failed'
     let ocrAvailable = true
+    const preprocessedPath = `${filePath}.ocr.png`
     try {
-      const { stdout } = await execFileAsync('tesseract', [filePath, 'stdout', '-l', 'tha+eng', '--psm', '6'], { timeout: 30_000, maxBuffer: 1_000_000 })
-      extracted = receiptSuggestions(stdout)
-      status = stdout.trim() ? 'pending_review' : 'failed'
-    } catch { ocrAvailable = false }
+      await execFileAsync('magick', ['-limit', 'memory', '256MiB', '-limit', 'map', '512MiB', '-limit', 'area', '100MP', filePath, '-auto-orient', '-colorspace', 'Gray', '-resize', '200%', '-deskew', '40%', '-normalize', preprocessedPath], { timeout: 20_000, maxBuffer: 1_000_000 })
+      await chmod(preprocessedPath, 0o600)
+      let bestScore = -1
+      let ocrSucceeded = false
+      for (const pageSegmentationMode of ['6', '11']) {
+        try {
+          const { stdout } = await execFileAsync('tesseract', [preprocessedPath, 'stdout', '-l', 'tha+eng', '--psm', pageSegmentationMode, '-c', 'preserve_interword_spaces=1'], { timeout: 30_000, maxBuffer: 1_000_000 })
+          ocrSucceeded = true
+          const candidate = parseReceiptOcr(stdout)
+          const score = scoreReceiptOcr(candidate)
+          if (score > bestScore) { bestScore = score; extracted = candidate }
+        } catch { /* Try the next layout mode; keep the image even if OCR fails. */ }
+      }
+      if (!ocrSucceeded) ocrAvailable = false
+      status = extracted.rawText.trim() ? 'pending_review' : 'failed'
+    } catch {
+      ocrAvailable = false
+    } finally {
+      await unlink(preprocessedPath).catch(() => {})
+    }
     try {
       const [result] = await pool.execute(`INSERT INTO receipt_attachments (owner_user_id, family_id, storage_key, original_name, mime_type, size_bytes, content_sha256, processing_status, extracted_data) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, [user.id, scope === 'family' ? familyId : null, storageKey, path.basename(String(body.fileName || 'receipt').slice(0, 255)), mimeType, buffer.length, createHash('sha256').update(buffer).digest('hex'), status, JSON.stringify(extracted)])
       return send(response, 201, { id: Number(result.insertId), status, ocrAvailable, extracted })
